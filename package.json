@@ -8,8 +8,8 @@
   "scripts": {
     "start": "electron .",
     "test": "node test/classifier.test.js && node test/features.test.js",
-    "dist": "electron-builder",
-    "dist:win": "electron-builder --win"
+    "dist": "electron-builder --publish never",
+    "dist:win": "electron-builder --win --publish never"
   },
   "devDependencies": {
     "electron": "^31.0.0",
