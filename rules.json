@@ -1,0 +1,40 @@
+{
+  "fallbackFolder": "Inbox",
+  "rules": [
+    {
+      "folder": "Tasks",
+      "keywords": ["todo", "task", "remind", "reminder", "deadline", "due", "finish", "buy", "call", "email", "schedule", "book", "pay", "fix", "submit", "follow up", "must", "need to", "have to"],
+      "tags": ["task", "todo"]
+    },
+    {
+      "folder": "Ideas",
+      "keywords": ["idea", "what if", "concept", "could build", "imagine", "invent", "prototype", "brainstorm", "feature", "app", "startup", "product", "design"],
+      "tags": ["idea"]
+    },
+    {
+      "folder": "Journal",
+      "keywords": ["today", "feeling", "felt", "grateful", "mood", "tired", "happy", "sad", "anxious", "reflect", "morning", "i think", "i feel", "i realized", "note to self"],
+      "tags": ["journal", "diary"]
+    },
+    {
+      "folder": "Research",
+      "keywords": ["research", "study", "paper", "read", "article", "learn", "how does", "why does", "look into", "investigate", "reference", "source", "data", "evidence", "theory"],
+      "tags": ["research", "reading"]
+    },
+    {
+      "folder": "People",
+      "keywords": ["met", "conversation", "meeting with", "talked to", "birthday", "contact", "friend", "colleague", "mentor", "introduced"],
+      "tags": ["people", "contact"]
+    },
+    {
+      "folder": "Projects",
+      "keywords": ["project", "milestone", "sprint", "roadmap", "launch", "ship", "build", "client", "deliverable", "spec"],
+      "tags": ["project"]
+    },
+    {
+      "folder": "Quotes",
+      "keywords": ["quote", "said", "“", "”", "wrote"],
+      "tags": ["quote"]
+    }
+  ]
+}

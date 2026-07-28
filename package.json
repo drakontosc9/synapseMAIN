@@ -1,0 +1,18 @@
+{
+  "name": "synapse",
+  "version": "0.1.0",
+  "description": "A mind-mapping app: capture a thought, it auto-files into a Markdown vault, and you navigate everything through an Obsidian-style graph.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/classifier.test.js && node test/features.test.js",
+    "package:win": "electron-packager . Synapse --platform=win32 --arch=x64 --icon=build/icon.ico --out=dist --overwrite --prune=true --ignore=\"(dist|/test|/build/icon.png)\"",
+    "package:mac": "electron-packager . Synapse --platform=darwin --arch=universal --icon=build/icon.icns --out=dist --overwrite --prune=true"
+  },
+  "author": "Ivan",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-packager": "^17.1.2"
+  }
+}
