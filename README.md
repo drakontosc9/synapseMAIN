@@ -1,5 +1,11 @@
 # Synapse
 
+[![Build Windows app](https://github.com/drakontosc9/synapseMAIN/actions/workflows/build.yml/badge.svg)](https://github.com/drakontosc9/synapseMAIN/actions/workflows/build.yml)
+[![▶ Run build](https://img.shields.io/badge/%E2%96%B6%20Run%20build-2ea44f?style=for-the-badge)](https://github.com/drakontosc9/synapseMAIN/actions/workflows/build.yml)
+
+> Click **▶ Run build**, then hit the green **Run workflow** button to build the Windows `.exe`.
+> When it finishes, the app zip is under that run's **Artifacts**. (Pushing a `v*` tag instead attaches it to a Release.)
+
 A mind-mapping app built around one idea: **capture a thought, and it files itself.**
 Open it, answer *"What's on your mind?"*, hit Enter — Synapse routes the note into the
 right folder and drops you into an Obsidian-style graph you navigate instead of a file tree.
