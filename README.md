@@ -13,6 +13,9 @@ right folder and drops you into an Obsidian-style graph you navigate instead of 
 Everything is plain **Markdown on your disk**. No lock-in, no database. You can open the
 same vault in Obsidian, VS Code, or any text editor.
 
+
+BEFORE YOU RUN THIS AS WITH ANY CODE DOWNLOADED FROM THE EVIL INTERNET RUN IT THROUGH ANTIVIRUS. PLEASE
+
 ## What it does
 
 - **Capture bar** — a calm "What's on your mind?" screen. As you type, a live hint shows
