@@ -31,21 +31,21 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Package Windows app (with icon)
-        run: npm run package:win
+      - name: Build Windows installer (NSIS) + portable zip
+        run: npm run dist:win
 
-      - name: Zip the build
-        shell: pwsh
-        run: Compress-Archive -Path dist/Synapse-win32-x64 -DestinationPath Synapse-Windows.zip -Force
-
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Synapse-Windows
-          path: Synapse-Windows.zip
+          path: |
+            dist/*.exe
+            dist/*.zip
 
-      - name: Attach to Release (on version tags only)
+      - name: Attach installer to Release (on version tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: Synapse-Windows.zip
+          files: |
+            dist/*.exe
+            dist/*.zip
