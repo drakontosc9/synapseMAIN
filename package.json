@@ -1,6 +1,6 @@
 {
   "name": "synapse",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "A mind-mapping app: capture a thought, it auto-files into a Markdown vault, and you navigate everything through an Obsidian-style graph.",
   "main": "main.js",
   "author": "Ivan",
@@ -20,7 +20,7 @@
     "productName": "Synapse",
     "directories": {
       "output": "dist",
-      "buildResources": "build"
+      "buildResources": "build-resources"
     },
     "files": [
       "main.js",

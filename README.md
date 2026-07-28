@@ -49,7 +49,6 @@ BEFORE YOU RUN THIS AS WITH ANY CODE DOWNLOADED FROM THE EVIL INTERNET RUN IT TH
 You need [Node.js](https://nodejs.org) (v18+).
 
 ```bash
-cd synapse
 npm install      # pulls in Electron (~1 min the first time)
 npm start
 ```
@@ -94,26 +93,40 @@ that route to it. Higher keyword/tag matches win; an explicit `#tag` counts for 
 loose keyword. Add folders, add keywords, reorder freely — changes take effect on the next
 captured thought.
 
+## Build a Windows installer
+
+CI builds this for you: **Actions → Build Windows app → Run workflow** produces a
+`Synapse Setup` installer (and a portable `.zip`) as downloadable artifacts. Pushing a
+`v*` tag attaches them to a GitHub Release.
+
+To build locally on Windows instead:
+
+```bash
+npm run dist:win     # outputs dist/Synapse Setup <version>.exe  +  a portable zip
+```
+
 ## Project layout
 
 | File | Role |
 |------|------|
-| `main.js` | Electron main process — owns the filesystem & IPC |
+| `main.js` | Electron main process — filesystem, IPC, config/rules, packaging entry |
 | `preload.js` | Secure bridge exposing `window.synapse` to the UI |
-| `classifier.js` | Keyword routing + Markdown parsing (unit-tested) |
-| `vault.js` | Scans the folder, builds the `{nodes, links}` graph model |
+| `classifier.js` | Keyword routing, title/tag/link extraction, Markdown parsing (tested) |
+| `fm.js` | Frontmatter read/write + parent-cycle checks (tested) |
+| `vault.js` | Scans the folder into the nested `{nodes, links, suggestions}` graph model |
 | `src/index.html` / `styles.css` | The capture screen + workspace shell |
-| `src/graph.js` | Dependency-free force-directed graph on `<canvas>` |
+| `src/graph.js` | Dependency-free semantic-zoom force graph on `<canvas>` |
+| `src/search.js` | Ranked note search (scored + exact modes) |
 | `src/renderer.js` | Wires the UI to the main process |
 | `rules.json` | Default sorting rules (copied into each new vault) |
+| `test/` | Node test suites for the classifier, frontmatter, vault, and graph engine |
 
 ## Roadmap ideas
 
-- Backlinks panel and unlinked-mention suggestions
-- PDF thumbnails as graph nodes
-- Optional AI fallback for ambiguous notes (hybrid mode)
-- Local full-text search across note bodies
-- Time-lapse / "what did I think about this week" view
+- Global quick-capture hotkey (capture from anywhere in Windows)
+- Image / PDF thumbnails rendered on graph nodes
+- Timeline / "what did I think about this week" time-lapse
+- Optional AI fallback for ambiguous notes (hybrid filing)
+- Code-signed installer to remove the SmartScreen warning
 
-Built as an MVP scaffold — the capture → classify → graph loop is fully working and every
-piece is plain, hackable JavaScript.
+Every piece is plain, hackable JavaScript — no build step for the app itself.
