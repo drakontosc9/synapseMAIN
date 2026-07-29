@@ -155,6 +155,9 @@
 
     // ---------- render ----------
     _tick() {
+      // self-heal: if the canvas has a CSS size but a 0×0 backing store (e.g. it was
+      // created while hidden and ResizeObserver didn't fire on show), size it now.
+      if ((!this.canvas.width || !this.canvas.height) && this.canvas.clientWidth) { this._resize(); this.reheat(.6); }
       this._animateCamera(); this._applyInertia(); this._step();
       const ctx = this.ctx, t = this.transform, W = this.canvas.clientWidth, H = this.canvas.clientHeight;
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
