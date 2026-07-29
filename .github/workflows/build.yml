@@ -31,6 +31,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Run UI smoke test (real renderer in Electron)
+        run: npm run test:ui
+
       - name: Build Windows installer (NSIS) + portable zip
         run: npm run dist:win
 

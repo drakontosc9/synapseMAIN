@@ -7,7 +7,8 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node test/classifier.test.js && node test/features.test.js",
+    "test": "node test/classifier.test.js && node test/features.test.js && node test/safeio.test.js && node test/vault-async.test.js",
+    "test:ui": "electron test/ui-smoke.js",
     "dist": "electron-builder --publish never",
     "dist:win": "electron-builder --win --publish never"
   },
@@ -33,15 +34,13 @@
       "buildResources": "build-resources"
     },
     "files": [
-      "main.js",
-      "preload.js",
-      "updater.js",
-      "classifier.js",
-      "vault.js",
-      "fm.js",
-      "rules.json",
-      "src/**/*",
-      "build/icon.png"
+      "**/*",
+      "!test/**",
+      "!.github/**",
+      "!dist/**",
+      "!*.md",
+      "!.gitattributes",
+      "!.gitignore"
     ],
     "win": {
       "target": [

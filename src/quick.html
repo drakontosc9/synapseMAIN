@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline';" />
+  <title>Quick capture</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="quick-body">
+  <div class="quick-card">
+    <div class="quick-row">
+      <span class="quick-mark">SYNAPSE</span>
+      <span id="quickDest" class="quick-dest"></span>
+      <span class="quick-esc"><kbd>Esc</kbd></span>
+    </div>
+    <textarea id="quickInput" class="quick-input" rows="1" spellcheck="false"
+      placeholder="What's on your mind?"></textarea>
+    <div id="quickStatus" class="quick-status">Enter to file · Shift+Enter for a new line</div>
+  </div>
+  <script src="quick.js"></script>
+</body>
+</html>

@@ -3,8 +3,16 @@
 //   - folder nodes and note nodes, each with `containerId` (the folder it lives in)
 //   - edges: wikilinks (solid), shared tags (faint), parent->child (directed arrow)
 // The renderer uses containerId to draw bubbles-within-bubbles with semantic zoom.
+//
+// Two entry points share one cache:
+//   scan(root)      - synchronous (used by the tests)
+//   scanAsync(root) - non-blocking (used by the app, so a 1000-note vault does
+//                     not freeze the main process on every edit)
+// Parsed notes are cached by mtime+size, so a rescan after one edit re-reads one
+// file instead of all of them.
 
 const fs = require('fs');
+const fsp = require('fs/promises');
 const path = require('path');
 const { parseNote } = require('./classifier');
 
@@ -14,6 +22,22 @@ const IGNORE = new Set(['.synapse', ATTACH_DIR, 'node_modules', '.git']);
 
 const toPosix = p => p.split(path.sep).join('/');
 
+// ---------- parse cache ----------
+const cache = new Map();               // absolute path -> { mtimeMs, size, parsed }
+
+function clearCache() { cache.clear(); }
+
+function cached(file, stat) {
+  const hit = cache.get(file);
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit.parsed;
+  return null;
+}
+function remember(file, stat, parsed) {
+  cache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, parsed });
+  return parsed;
+}
+
+// ---------- directory traversal ----------
 function walk(root) {
   const out = [];
   const stack = [root];
@@ -49,17 +73,55 @@ function walkDirs(root) {
   return out;
 }
 
-function scan(root) {
-  const files = walk(root);
+// Async traversal returning both .md files and every directory in one pass.
+async function walkAllAsync(root) {
+  const files = [];
+  const dirs = [];
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (e.name.startsWith('.') || IGNORE.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { dirs.push(toPosix(path.relative(root, full))); stack.push(full); }
+      else if (e.isFile() && e.name.toLowerCase().endsWith('.md')) files.push(full);
+    }
+  }
+  return { files, dirs };
+}
+
+// ---------- reading ----------
+function readOne(file) {
+  let stat;
+  try { stat = fs.statSync(file); } catch { return null; }
+  const hit = cached(file, stat);
+  if (hit) return hit;
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  return remember(file, stat, parseNote(raw));
+}
+
+async function readOneAsync(file) {
+  let stat;
+  try { stat = await fsp.stat(file); } catch { return null; }
+  const hit = cached(file, stat);
+  if (hit) return hit;
+  let raw;
+  try { raw = await fsp.readFile(file, 'utf8'); } catch { return null; }
+  return remember(file, stat, parseNote(raw));
+}
+
+// ---------- model building ----------
+// entries: [{ file, parsed }]  dirs: ['Ideas', 'Ideas/Sub', ...]
+function buildModel(root, entries, dirs) {
   const noteNodes = [];
   const byTitle = new Map();      // lowercased title/basename -> note id
   const tagIndex = new Map();     // tag -> [note ids]
   const folderIds = new Set();    // every folder that must exist as a node
 
-  for (const file of files) {
-    let raw = '';
-    try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
-    const parsed = parseNote(raw);
+  for (const { file, parsed } of entries) {
     const rel = toPosix(path.relative(root, file));
     const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ROOT;
     const base = path.basename(file, '.md');
@@ -91,7 +153,7 @@ function scan(root) {
   }
 
   // include every directory (even empty groups)
-  for (const d of walkDirs(root)) folderIds.add(d);
+  for (const d of dirs) folderIds.add(d);
 
   // folder nodes
   const folderNodes = [...folderIds].map(id => ({
@@ -131,17 +193,26 @@ function scan(root) {
       if (p) add(p, n.id, 'parent', true);   // parent -> child (directed)
     }
   }
-  for (const [, ids] of tagIndex) {
+  // A tag shared by many notes produces n^2 edges: one #todo across 500 notes is
+  // 125k pairs, which is both slow and meaningless — at that point the tag says
+  // nothing about any particular pair. Skip those, but report them (see
+  // `busyTags` below) so the omission is visible rather than silent.
+  const MAX_TAG_FANOUT = 80;
+  const busyTags = [];
+  for (const [tag, ids] of tagIndex) {
+    if (ids.length > MAX_TAG_FANOUT) { busyTags.push({ tag, count: ids.length }); continue; }
     for (let i = 0; i < ids.length; i++)
       for (let j = i + 1; j < ids.length; j++)
         add(ids[i], ids[j], 'tag', false);
   }
+  busyTags.sort((a, b) => b.count - a.count);
 
   // ---- suggested links: note pairs that SHARE tags but aren't yet linked ----
   const linked = new Set(links.filter(l => l.type === 'wikilink' || l.type === 'parent')
     .map(l => [l.source, l.target].sort().join('~')));
   const sug = new Map();  // key -> {a,b,shared}
   for (const [, ids] of tagIndex) {
+    if (ids.length > MAX_TAG_FANOUT) continue;
     for (let i = 0; i < ids.length; i++)
       for (let j = i + 1; j < ids.length; j++) {
         const key = [ids[i], ids[j]].sort().join('~');
@@ -159,7 +230,32 @@ function scan(root) {
   allNodes = [rootNode, ...allNodes];
 
   const folders = [...new Set(noteNodes.map(n => n.folder))].sort();
-  return { nodes: allNodes, links, folders, suggestions };
+  return { nodes: allNodes, links, folders, suggestions, busyTags };
 }
 
-module.exports = { scan, walk, ATTACH_DIR, ROOT };
+function scan(root) {
+  const entries = [];
+  for (const file of walk(root)) {
+    const parsed = readOne(file);
+    if (parsed) entries.push({ file, parsed });
+  }
+  return buildModel(root, entries, walkDirs(root));
+}
+
+async function scanAsync(root) {
+  const { files, dirs } = await walkAllAsync(root);
+  const entries = [];
+  // read in modest batches: enough concurrency to be fast, not enough to
+  // exhaust file handles on a large vault
+  const BATCH = 32;
+  for (let i = 0; i < files.length; i += BATCH) {
+    const slice = files.slice(i, i + BATCH);
+    const parsedList = await Promise.all(slice.map(readOneAsync));
+    for (let j = 0; j < slice.length; j++) {
+      if (parsedList[j]) entries.push({ file: slice[j], parsed: parsedList[j] });
+    }
+  }
+  return buildModel(root, entries, dirs);
+}
+
+module.exports = { scan, scanAsync, walk, clearCache, ATTACH_DIR, ROOT };

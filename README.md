@@ -20,9 +20,17 @@ BEFORE YOU RUN THIS AS WITH ANY CODE DOWNLOADED FROM THE EVIL INTERNET RUN IT TH
 
 - **Capture bar** — a calm "What's on your mind?" screen. As you type, a live hint shows
   where the thought will land.
+- **Global quick capture** — press **Ctrl+Shift+Space** anywhere in Windows for a one-line
+  capture bar. Type, Enter, gone — the main window never has to be open. Rebindable in
+  Settings, and Synapse can stay in the tray so capture is always instant.
 - **Keyword auto-filing** — a rule-based classifier (`rules.json`) scores your text against
   keyword and `#tag` lists and picks a folder (Tasks, Ideas, Journal, Research, People,
   Projects, Quotes, or Inbox as fallback). No AI calls, fully offline and private.
+- **Filing that learns** — when it guesses wrong, the confirmation offers *"Wrong folder?"*.
+  Pick the right one and Synapse can add that thought's distinctive words to the folder's
+  keywords, so the next similar thought lands correctly.
+- **Recent notes** — `Ctrl+E` for a reverse-chronological list bucketed by Today /
+  Yesterday / this week. The graph is a map; this is the index.
 - **Nested, semantic-zoom graph** — folders are big bubbles; their notes (and sub-folders)
   appear only as you zoom in, recursively. Click a folder to zoom into it; capturing a
   thought flips you into the graph focused on the new note. Scroll to zoom, drag the
@@ -40,9 +48,30 @@ BEFORE YOU RUN THIS AS WITH ANY CODE DOWNLOADED FROM THE EVIL INTERNET RUN IT TH
   - **Faint dotted** = notes sharing a `#tag`.
   - Toggle any of them in the legend.
 - **Note editor** — click a node to read it; hit *Edit* for the raw Markdown; *Reveal* to
-  show the file on disk.
+  show the file on disk. Edits autosave when you click away, switch notes or close the
+  panel, so nothing is lost by accident. `[[wikilinks]]` in the preview are clickable.
+- **Move / delete** — re-file a note into any folder, or send it to the system trash
+  (recoverable) from the note panel, the right-click menu or the command palette.
 - **Import** — copy images / PDFs into `attachments/` (embedded as Markdown), or save a URL
   as its own note in `Links/`.
+- **Live sync with your other editors** — Synapse watches the vault, so notes you change in
+  Obsidian, VS Code or Explorer show up without pressing rescan.
+
+### Keyboard
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+Shift+Space` | Quick capture from anywhere (global, rebindable) |
+| `Ctrl+N` | New thought |
+| `Ctrl+K` | Command palette |
+| `Ctrl+F` | Jump to search |
+| `Ctrl+E` | Recent notes |
+| `Ctrl+S` / `Ctrl+Enter` | Save the note you're editing |
+| `Ctrl+Z` | Undo the last graph change (never steals undo from a text field) |
+| `Ctrl+0` | Fit graph to view |
+| `Ctrl+R` | Reload the vault from disk |
+| `Ctrl+T` | Cycle theme |
+| `Esc` | Close the topmost dialog, palette or menu |
 
 ## Run it
 
@@ -109,23 +138,39 @@ npm run dist:win     # outputs dist/Synapse Setup <version>.exe  +  a portable z
 
 | File | Role |
 |------|------|
-| `main.js` | Electron main process — filesystem, IPC, config/rules, packaging entry |
+| `main.js` | Electron main process — windows, menu, tray, global hotkey, IPC, filesystem |
 | `preload.js` | Secure bridge exposing `window.synapse` to the UI |
+| `log.js` | Append-only log in `%APPDATA%/synapse/logs` (Help → Open log file) |
+| `safeio.js` | Atomic file writes + vault path containment (tested) |
 | `classifier.js` | Keyword routing, title/tag/link extraction, Markdown parsing (tested) |
 | `fm.js` | Frontmatter read/write + parent-cycle checks (tested) |
-| `vault.js` | Scans the folder into the nested `{nodes, links, suggestions}` graph model |
+| `vault.js` | Scans the folder into the nested `{nodes, links, suggestions}` graph model (async + mtime-cached) |
 | `src/index.html` / `styles.css` | The capture screen + workspace shell |
+| `src/quick.html` / `quick.js` | The global quick-capture bar |
 | `src/graph.js` | Dependency-free semantic-zoom force graph on `<canvas>` |
 | `src/search.js` | Ranked note search (scored + exact modes) |
 | `src/renderer.js` | Wires the UI to the main process |
 | `rules.json` | Default sorting rules (copied into each new vault) |
-| `test/` | Node test suites for the classifier, frontmatter, vault, and graph engine |
+| `test/` | Node suites (`npm test`) + a real-renderer Electron smoke test (`npm run test:ui`) |
+
+## Your data
+
+Everything is a plain file you own, and Synapse tries hard not to lose any of it:
+
+- **Atomic writes.** Notes, config and rules are written to a temp file and renamed into
+  place, so a crash or power cut can never leave a half-written note.
+- **Deletes go to the system trash**, never `unlink`.
+- **One instance only.** A second copy would race the first one writing the same files, so
+  launching Synapse again just focuses the window you already have.
+- **Nothing is swallowed.** Failures are logged rather than silently ignored — Settings →
+  How to use → *Show log file*.
 
 ## Roadmap ideas
 
-- Global quick-capture hotkey (capture from anywhere in Windows)
 - Image / PDF thumbnails rendered on graph nodes
 - Timeline / "what did I think about this week" time-lapse
+- Local-graph mode with an adjustable hop count
+- Orphan detector (notes nothing links to)
 - Optional AI fallback for ambiguous notes (hybrid filing)
 - Code-signed installer to remove the SmartScreen warning
 
