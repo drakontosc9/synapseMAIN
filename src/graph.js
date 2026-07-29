@@ -17,7 +17,8 @@
     repulsion: 4200, spring: 0.02, linkTension: 1, packing: 1,
     animSpeed: 1, inertia: true, longPressMs: 2000,
     ripples: true, showMinimap: true, showSuggestions: false,
-    reveal: 'fade'   // 'fade' = all children fade together | 'stagger' = 1-by-1 on zoom
+    reveal: 'fade',       // 'fade' = all children fade together | 'stagger' = 1-by-1 on zoom
+    edgeStyle: 'curved'   // 'curved' = web-like arcs | 'straight'
   };
 
   class SynapseGraph {
@@ -109,9 +110,18 @@
         if (n.type === 'root') continue;
         const p = n.parentRef;
         if (p && p.type !== 'root') {
-          n.vx += (p.x - n.x) * 0.05 * c.packing; n.vy += (p.y - n.y) * 0.05 * c.packing;
-          let dx = n.x - p.x, dy = n.y - p.y, d = Math.hypot(dx, dy) || .01, maxR = Math.max(12, p.r - n.r - 8);
-          if (d > maxR) { n.x = p.x + dx / d * maxR; n.y = p.y + dy / d * maxR; n.vx *= .3; n.vy *= .3; }
+          let dx = n.x - p.x, dy = n.y - p.y, d = Math.hypot(dx, dy) || .01;
+          if (n.type === 'folder') {
+            // sub-folders orbit just OUTSIDE the parent circle's rim
+            const ring = p.r + n.r + 10;
+            const k2 = (d - ring) * 0.09;
+            n.vx -= dx / d * k2; n.vy -= dy / d * k2;
+          } else {
+            // notes are pulled toward the parent and kept INSIDE the bubble
+            n.vx += (p.x - n.x) * 0.05 * c.packing; n.vy += (p.y - n.y) * 0.05 * c.packing;
+            const maxR = Math.max(12, p.r - n.r - 8);
+            if (d > maxR) { n.x = p.x + dx / d * maxR; n.y = p.y + dy / d * maxR; n.vx *= .3; n.vy *= .3; }
+          }
         } else { n.vx += (w / 2 - n.x) * 0.02 * this.alpha; n.vy += (h / 2 - n.y) * 0.02 * this.alpha; }
         if (n === this.dragNode) { n.vx = 0; n.vy = 0; continue; }
         n.vx *= .8; n.vy *= .8; n.x += n.vx * this.alpha; n.y += n.vy * this.alpha;
@@ -187,7 +197,7 @@
         for (const s of this.suggestions) {
           const a = this.map.get(s.a), b = this.map.get(s.b); if (!a || !b) continue;
           const al = Math.min(aOf(a), aOf(b)); if (al <= .02) continue;
-          ctx.globalAlpha = al * .5; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+          ctx.globalAlpha = al * .5; this._edgePath(ctx, a, b);
           ctx.strokeStyle = 'rgba(150,167,181,.5)'; ctx.lineWidth = .8 / t.k; ctx.setLineDash([3 / t.k, 5 / t.k]); ctx.stroke(); ctx.setLineDash([]);
         }
       }
@@ -196,7 +206,7 @@
       for (const l of this.links) {
         if (!this.filterEdges.has(l.type)) continue;
         const a = Math.min(aOf(l.source), aOf(l.target)) * Math.min(focusDim(l.source), focusDim(l.target)); if (a <= .02) continue;
-        ctx.globalAlpha = a; ctx.beginPath(); ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y);
+        ctx.globalAlpha = a; this._edgePath(ctx, l.source, l.target);
         if (l.type === 'wikilink') { ctx.strokeStyle = 'rgba(160,175,195,.6)'; ctx.lineWidth = 1.1 / t.k; }
         else if (l.type === 'parent') { ctx.strokeStyle = 'rgba(240,163,94,.75)'; ctx.lineWidth = 1.6 / t.k; }
         else { ctx.strokeStyle = 'rgba(124,156,255,.15)'; ctx.lineWidth = .8 / t.k; }
@@ -263,6 +273,14 @@
       }
     }
     _ring(ctx, n, col, t) { ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 6 / t.k, 0, 7); ctx.strokeStyle = col; ctx.lineWidth = 2.5 / t.k; ctx.stroke(); }
+    _edgePath(ctx, s, tg) {
+      ctx.beginPath(); ctx.moveTo(s.x, s.y);
+      if (this.cfg.edgeStyle === 'straight') { ctx.lineTo(tg.x, tg.y); return; }
+      const dx = tg.x - s.x, dy = tg.y - s.y, len = Math.hypot(dx, dy) || 1;
+      const off = Math.min(len * 0.18, 70);
+      const mx = (s.x + tg.x) / 2 + (-dy / len) * off, my = (s.y + tg.y) / 2 + (dx / len) * off;
+      ctx.quadraticCurveTo(mx, my, tg.x, tg.y);
+    }
     _arrow(ctx, s, tg, a) {
       const ang = Math.atan2(tg.y - s.y, tg.x - s.x), k = this.transform.k;
       const tipX = tg.x - Math.cos(ang) * (tg.r + 2), tipY = tg.y - Math.sin(ang) * (tg.r + 2), len = 7 / k;

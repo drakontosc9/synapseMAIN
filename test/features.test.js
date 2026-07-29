@@ -86,6 +86,11 @@ console.log('\ngraph.js semantic-zoom engine:');
   const inside = Math.hypot(child.x - sub.x, child.y - sub.y) <= sub.r + 1;
   truthy('containment keeps child inside its folder', inside);
 
+  // sub-folders orbit OUTSIDE the parent, notes stay inside
+  const ideas = g.map.get('Ideas'), rootNote = g.map.get('Ideas/root.md');
+  truthy('sub-folder orbits outside its parent circle', Math.hypot(sub.x - ideas.x, sub.y - ideas.y) > ideas.r);
+  truthy('note stays inside its parent circle', Math.hypot(rootNote.x - ideas.x, rootNote.y - ideas.y) <= ideas.r + 1);
+
   // semantic zoom: collapsed when small on screen, expanded when zoomed in
   g.transform.k = 0.05;
   const collapsed = g._containerAlpha('Ideas', new Map());
@@ -100,7 +105,8 @@ console.log('\ngraph.js semantic-zoom engine:');
   truthy('focusNote starts a camera tween', !!g.anim);
   truthy('focusNote zooms in enough to open ancestors', g.anim.to.k > 1);
 
-  // gesture resolution: node hit-testing at a world point
+  // gesture resolution: node hit-testing at a world point (zoomed in so it's visible)
+  g.transform.k = 3;
   const hit = g._nodeAtWorld(child.x, child.y, null);
   truthy('hit-test finds a node', !!hit);
 
@@ -158,6 +164,9 @@ console.log('\nv0.3 vault: master root + suggestions:');
   ok('rippleNote enqueues a ripple', g.ripples.length, 1);
   g.setConfig({ nodeScale: 2 });
   truthy('setConfig rescales note nodes', g.map.get('Ideas/a.md').r > 6);
+  truthy('edgeStyle defaults to curved', g.cfg.edgeStyle === 'curved');
+  g.setConfig({ edgeStyle: 'straight' });
+  truthy('setConfig switches edge style', g.cfg.edgeStyle === 'straight');
   g.fit();
   truthy('fit frames the vault root children', !!g.anim);
 

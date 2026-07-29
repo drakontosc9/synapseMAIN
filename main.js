@@ -37,7 +37,7 @@ const DEFAULT_CONFIG = {
   repulsion: 4200, spring: 0.02, linkTension: 1, packing: 1,
   animSpeed: 1, inertia: true, longPressMs: 2000,
   ripples: true, sound: false, showMinimap: true, showSuggestions: false,
-  reveal: 'fade',
+  reveal: 'fade', edgeStyle: 'curved',
   folderColors: {}
 };
 function configPath() { return settings.vaultPath ? path.join(settings.vaultPath, '.synapse', 'config.json') : null; }

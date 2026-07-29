@@ -63,7 +63,8 @@ function applyConfig(cfg) {
     threshold: config.threshold, ramp: config.ramp, repulsion: config.repulsion, spring: config.spring,
     linkTension: config.linkTension, packing: config.packing, animSpeed: config.animSpeed, inertia: config.inertia,
     longPressMs: config.longPressMs, ripples: config.ripples, showMinimap: config.showMinimap,
-    showSuggestions: config.showSuggestions, reveal: config.reveal || 'fade', folderColors: config.folderColors || {}
+    showSuggestions: config.showSuggestions, reveal: config.reveal || 'fade',
+    edgeStyle: config.edgeStyle || 'curved', folderColors: config.folderColors || {}
   });
   syncControls();
 }
@@ -363,6 +364,7 @@ function wireSettings() {
   const bindToggle = (id, key) => el(id).addEventListener('change', e => updateConfig({ [key]: e.target.checked }));
   ['ripples', 'sound', 'showMinimap', 'showSuggestions', 'inertia'].forEach(k => bindToggle(k, k));
   el('stagger').addEventListener('change', e => updateConfig({ reveal: e.target.checked ? 'stagger' : 'fade' }));
+  el('curvedEdges').addEventListener('change', e => updateConfig({ edgeStyle: e.target.checked ? 'curved' : 'straight' }));
   const bindRange = (id, key, fmt) => { el(id).addEventListener('input', e => { const v = parseFloat(e.target.value); el(id + 'V') && (el(id + 'V').textContent = fmt ? fmt(v) : v); updateConfig({ [key]: v }); }); };
   bindRange('nodeScale', 'nodeScale'); bindRange('labelScale', 'labelScale'); bindRange('threshold', 'threshold');
   bindRange('repulsion', 'repulsion'); bindRange('linkTension', 'linkTension'); bindRange('packing', 'packing');
@@ -381,6 +383,7 @@ function syncControls() {
   set('packing', config.packing); set('animSpeed', config.animSpeed); set('longPressMs', config.longPressMs);
   set('ripples', config.ripples); set('sound', config.sound); set('showMinimap', config.showMinimap); set('showSuggestions', config.showSuggestions); set('inertia', config.inertia);
   { const s = el('stagger'); if (s) s.checked = config.reveal === 'stagger'; }
+  { const e = el('curvedEdges'); if (e) e.checked = (config.edgeStyle || 'curved') === 'curved'; }
   document.querySelectorAll('#themeRow .chip').forEach(c => c.classList.toggle('active', c.dataset.theme === config.theme));
   document.querySelectorAll('#bgRow .chip').forEach(c => c.classList.toggle('active', c.dataset.bg === config.background));
   renderFolderColors();
