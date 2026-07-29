@@ -142,9 +142,31 @@ function parseNote(content) {
   };
 }
 
+/**
+ * Distinctive words from a thought, for learning filing rules when the user
+ * corrects a mis-filed note. Stopwords, short words and duplicates are dropped
+ * so we only ever add terms that could plausibly discriminate a folder.
+ */
+function learnableTerms(text, limit) {
+  const words = String(text || '').toLowerCase().match(/[a-z][a-z'-]{3,}/g) || [];
+  const seen = new Set();
+  const out = [];
+  const max = limit || 6;
+  for (const w of words) {
+    const clean = w.replace(/^['-]+/, '').replace(/['-]+$/, '');
+    if (clean.length < 4) continue;
+    if (STOPWORDS.has(clean)) continue;
+    if (seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 module.exports = {
   classify, extractTags, extractLinks, deriveTitle, slugify,
-  buildNote, parseNote, STOPWORDS
+  buildNote, parseNote, learnableTerms, STOPWORDS
 };

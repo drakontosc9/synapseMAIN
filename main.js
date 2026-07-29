@@ -2,29 +2,56 @@
 // Owns the filesystem: choosing the vault, classifying + saving thoughts,
 // reading/writing notes, and importing images / PDFs / links.
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const {
+  app, BrowserWindow, ipcMain, dialog, shell,
+  Menu, Tray, nativeImage, globalShortcut, screen
+} = require('electron');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const log = require('./log');
+const { writeFileAtomic, writeJsonAtomic, resolveInVault, sanitizeName } = require('./safeio');
 const classifier = require('./classifier');
 const vault = require('./vault');
 const fmlib = require('./fm');
 
 const SETTINGS_PATH = path.join(app?.getPath ? app.getPath('userData') : os.tmpdir(), 'synapse-settings.json');
-let settings = { vaultPath: null, groupCreate: 'both' };
+const DEFAULT_SHORTCUT = 'Control+Shift+Space';
+
+let settings = {
+  vaultPath: null,
+  groupCreate: 'both',
+  quickShortcut: DEFAULT_SHORTCUT,
+  quickCaptureEnabled: true,
+  runInTray: false,
+  window: null
+};
+
+let mainWindow = null;
+let quickWindow = null;
+let tray = null;
+let isQuitting = false;
 
 function loadSettings() {
-  try { settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')); } catch {}
+  try {
+    settings = Object.assign(settings, JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')));
+  } catch (err) {
+    if (err.code !== 'ENOENT') log.warn('could not read settings: ', err);
+  }
 }
 function saveSettings() {
-  try { fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2)); } catch {}
+  try { writeJsonAtomic(SETTINGS_PATH, settings); }
+  catch (err) { log.error('could not save settings — vault choice may not persist: ', err); }
 }
 
 function rulesPath() { return settings.vaultPath ? path.join(settings.vaultPath, '.synapse', 'rules.json') : null; }
 function loadRules() {
   const custom = rulesPath();
-  if (custom && fs.existsSync(custom)) { try { return JSON.parse(fs.readFileSync(custom, 'utf8')); } catch {} }
+  if (custom && fs.existsSync(custom)) {
+    try { return JSON.parse(fs.readFileSync(custom, 'utf8')); }
+    catch (err) { log.warn('vault rules.json is invalid, using defaults: ', err); }
+  }
   return JSON.parse(fs.readFileSync(path.join(__dirname, 'rules.json'), 'utf8'));
 }
 
@@ -44,53 +71,407 @@ function configPath() { return settings.vaultPath ? path.join(settings.vaultPath
 function loadConfig() {
   const p = configPath();
   let stored = {};
-  if (p && fs.existsSync(p)) { try { stored = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {} }
-  else if (settings.config) stored = settings.config;
+  if (p && fs.existsSync(p)) {
+    try { stored = JSON.parse(fs.readFileSync(p, 'utf8')); }
+    catch (err) { log.warn('vault config.json is invalid, using defaults: ', err); }
+  } else if (settings.config) stored = settings.config;
   return Object.assign({}, DEFAULT_CONFIG, stored);
 }
 function saveConfig(cfg) {
   settings.config = cfg; saveSettings();
   const p = configPath();
-  if (p) { try { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify(cfg, null, 2)); } catch {} }
+  if (p) {
+    try { writeJsonAtomic(p, cfg); }
+    catch (err) { log.error('could not save vault config: ', err); }
+  }
+}
+
+// ---------- window state ----------
+// Electron has no built-in save/restore for window bounds, so persist them
+// ourselves and sanity-check them against the displays that exist right now
+// (a window restored onto an unplugged monitor is invisible and unrecoverable).
+function savedBounds() {
+  const w = settings.window;
+  if (!w || !Number.isFinite(w.width) || !Number.isFinite(w.height)) return null;
+  if (!Number.isFinite(w.x) || !Number.isFinite(w.y)) return { width: w.width, height: w.height };
+  const visible = screen.getAllDisplays().some(d => {
+    const a = d.workArea;
+    return w.x < a.x + a.width && w.x + w.width > a.x && w.y < a.y + a.height && w.y + w.height > a.y;
+  });
+  return visible ? { x: w.x, y: w.y, width: w.width, height: w.height } : { width: w.width, height: w.height };
+}
+function rememberBounds(win) {
+  if (!win || win.isDestroyed() || win.isMinimized()) return;
+  const maximized = win.isMaximized();
+  const b = maximized ? (settings.window || {}) : win.getBounds();
+  settings.window = { x: b.x, y: b.y, width: b.width, height: b.height, maximized };
+  saveSettings();
 }
 
 function createWindow() {
-  const win = new BrowserWindow({
+  const restored = savedBounds();
+  const win = new BrowserWindow(Object.assign({
     width: 1200,
     height: 820,
     minWidth: 780,
     minHeight: 560,
     backgroundColor: '#0e1116',
+    show: false,
     icon: path.join(__dirname, 'build', 'icon.png'),
-    titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false
     }
-  });
+  }, restored || {}));
+
+  if (settings.window && settings.window.maximized) win.maximize();
+  win.once('ready-to-show', () => win.show());
+
   win.loadFile(path.join(__dirname, 'src', 'index.html'));
+  hardenWebContents(win.webContents, win);
+
+  let saveTimer = null;
+  const queueSave = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => rememberBounds(win), 400); };
+  win.on('resize', queueSave);
+  win.on('move', queueSave);
+  win.on('maximize', queueSave);
+  win.on('unmaximize', queueSave);
+
+  win.on('close', (e) => {
+    if (settings.runInTray && !isQuitting) { e.preventDefault(); win.hide(); return; }
+    rememberBounds(win);
+  });
+  win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
+
   return win;
 }
 
-app.whenReady().then(() => {
-  loadSettings();
-  const win = createWindow();
-  try { require('./updater').initAutoUpdate(win); } catch {}
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// Only http(s)/mailto ever leave the app, and they leave through the OS browser.
+function openExternal(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'mailto:') {
+      shell.openExternal(url);
+      return true;
+    }
+  } catch {}
+  log.warn('blocked external navigation: ' + url);
+  return false;
+}
+
+// A note's Markdown can contain arbitrary links. Without these guards, clicking
+// one either navigates the app window away from index.html (leaving a dead
+// window with no back button) or spawns a chrome-less BrowserWindow.
+function hardenWebContents(wc, win) {
+  wc.setWindowOpenHandler(({ url }) => {
+    openExternal(url);
+    return { action: 'deny' };
   });
-});
+  wc.on('will-navigate', (e, url) => {
+    if (url === wc.getURL()) return;      // in-page / reload
+    e.preventDefault();
+    openExternal(url);
+  });
+  wc.on('will-attach-webview', (e) => e.preventDefault());
+  wc.on('render-process-gone', (_e, details) => {
+    log.error('renderer gone: ' + JSON.stringify(details));
+    if (win && !win.isDestroyed()) {
+      dialog.showMessageBox(win, {
+        type: 'error', buttons: ['Reload', 'Quit'], defaultId: 0, cancelId: 1,
+        title: 'Synapse stopped responding',
+        message: 'The window crashed (' + details.reason + ').',
+        detail: 'Your notes are plain files on disk and are safe. Reload to continue.'
+      }).then(r => { if (r.response === 0) win.reload(); else app.quit(); }).catch(() => {});
+    }
+  });
+  wc.on('unresponsive', () => log.warn('renderer unresponsive'));
+}
+
+// ---------- quick capture ----------
+// The whole premise of the app is that capture is frictionless, which means it
+// has to work without finding or launching the window first.
+function createQuickWindow() {
+  const win = new BrowserWindow({
+    width: 620, height: 132,
+    frame: false, resizable: false, movable: true,
+    alwaysOnTop: true, skipTaskbar: true, show: false,
+    transparent: false, backgroundColor: '#00000000',
+    icon: path.join(__dirname, 'build', 'icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true, nodeIntegration: false, sandbox: true
+    }
+  });
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.loadFile(path.join(__dirname, 'src', 'quick.html'));
+  hardenWebContents(win.webContents, win);
+  win.on('blur', () => { if (!win.isDestroyed() && win.isVisible()) win.hide(); });
+  win.on('close', (e) => { if (!isQuitting) { e.preventDefault(); win.hide(); } });
+  return win;
+}
+
+function showQuickCapture() {
+  if (!quickWindow || quickWindow.isDestroyed()) quickWindow = createQuickWindow();
+  // centre on whichever display the cursor is on
+  try {
+    const pt = screen.getCursorScreenPoint();
+    const area = screen.getDisplayNearestPoint(pt).workArea;
+    const [w, h] = quickWindow.getSize();
+    quickWindow.setPosition(
+      Math.round(area.x + (area.width - w) / 2),
+      Math.round(area.y + area.height * 0.28)
+    );
+  } catch (err) { log.warn('could not position quick capture: ', err); }
+  quickWindow.show();
+  quickWindow.focus();
+  quickWindow.webContents.send('quick-reset');
+}
+
+function registerShortcut() {
+  globalShortcut.unregisterAll();
+  if (!settings.quickCaptureEnabled) return { ok: true, registered: false };
+  const accel = settings.quickShortcut || DEFAULT_SHORTCUT;
+  try {
+    const ok = globalShortcut.register(accel, showQuickCapture);
+    if (!ok) {
+      log.warn('global shortcut rejected (already taken?): ' + accel);
+      return { ok: false, error: accel + ' is already used by another app.' };
+    }
+    log.info('quick capture bound to ' + accel);
+    return { ok: true, registered: true };
+  } catch (err) {
+    log.error('could not register shortcut: ', err);
+    return { ok: false, error: String(err.message || err) };
+  }
+}
+
+// ---------- tray ----------
+function createTray() {
+  try {
+    let img = nativeImage.createFromPath(path.join(__dirname, 'build', 'icon.png'));
+    if (!img.isEmpty()) img = img.resize({ width: 16, height: 16 });
+    tray = new Tray(img);
+    tray.setToolTip('Synapse');
+    refreshTrayMenu();
+    tray.on('click', showMain);
+  } catch (err) {
+    log.warn('could not create tray icon: ', err);
+  }
+}
+function refreshTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Quick capture', accelerator: settings.quickShortcut, click: showQuickCapture },
+    { label: 'Open Synapse', click: showMain },
+    { type: 'separator' },
+    { label: settings.vaultPath ? 'Vault: ' + path.basename(settings.vaultPath) : 'No vault chosen', enabled: false },
+    { label: 'Reveal vault folder', enabled: !!settings.vaultPath, click: () => settings.vaultPath && shell.openPath(settings.vaultPath) },
+    { type: 'separator' },
+    { label: 'Quit Synapse', click: () => { isQuitting = true; app.quit(); } }
+  ]));
+}
+
+function showMain() {
+  if (!mainWindow || mainWindow.isDestroyed()) { mainWindow = createWindow(); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// ---------- application menu ----------
+// Without this the app inherits Electron's default menu and, more importantly,
+// has no Edit roles — which is how clipboard shortcuts are guaranteed to work
+// in text fields.
+function buildMenu() {
+  const send = (action) => () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      showMain();
+      mainWindow.webContents.send('menu-action', action);
+    }
+  };
+  const isMac = process.platform === 'darwin';
+
+  const template = [
+    ...(isMac ? [{ role: 'appMenu' }] : []),
+    {
+      label: '&File',
+      submenu: [
+        { label: 'New thought', accelerator: 'CmdOrCtrl+N', click: send('new-thought') },
+        { label: 'Quick capture', accelerator: settings.quickShortcut, click: showQuickCapture },
+        { type: 'separator' },
+        { label: 'Choose vault folder…', click: send('choose-vault') },
+        { label: 'Reveal vault in file manager', enabled: !!settings.vaultPath, click: () => settings.vaultPath && shell.openPath(settings.vaultPath) },
+        { type: 'separator' },
+        { label: 'Export graph as PNG…', accelerator: 'CmdOrCtrl+Shift+E', click: send('export-png') },
+        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: send('open-settings') },
+        { type: 'separator' },
+        isMac ? { role: 'close' } : { role: 'quit', label: 'Quit Synapse' }
+      ]
+    },
+    {
+      label: '&Edit',
+      submenu: [
+        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' },
+        ...(isMac ? [{ role: 'pasteAndMatchStyle' }] : []),
+        { role: 'delete' }, { type: 'separator' }, { role: 'selectAll' },
+        { type: 'separator' },
+        { label: 'Find note', accelerator: 'CmdOrCtrl+F', click: send('focus-search') },
+        { label: 'Command palette', accelerator: 'CmdOrCtrl+K', click: send('palette') }
+      ]
+    },
+    {
+      label: '&View',
+      submenu: [
+        { label: 'Fit graph to view', accelerator: 'CmdOrCtrl+0', click: send('fit') },
+        { label: 'Reload vault from disk', accelerator: 'CmdOrCtrl+R', click: send('rescan') },
+        { label: 'Recent notes', accelerator: 'CmdOrCtrl+E', click: send('recents') },
+        { type: 'separator' },
+        { label: 'Cycle theme', accelerator: 'CmdOrCtrl+T', click: send('cycle-theme') },
+        { role: 'togglefullscreen' },
+        { type: 'separator' },
+        { label: 'Reload window', accelerator: 'CmdOrCtrl+Shift+R', click: () => mainWindow && mainWindow.reload() },
+        { role: 'toggleDevTools' }
+      ]
+    },
+    {
+      label: '&Help',
+      submenu: [
+        { label: 'How to use Synapse', click: send('open-help') },
+        { label: 'Open log file', click: () => { const f = log.file(); if (f) shell.showItemInFolder(f); } },
+        { type: 'separator' },
+        { label: 'About Synapse ' + app.getVersion(), click: () => {
+          dialog.showMessageBox(mainWindow, {
+            type: 'info', title: 'About Synapse',
+            message: 'Synapse ' + app.getVersion(),
+            detail: 'Electron ' + process.versions.electron + '  ·  Node ' + process.versions.node +
+                    '\nVault: ' + (settings.vaultPath || 'none chosen') +
+                    '\nLog: ' + (log.file() || 'unavailable')
+          }).catch(() => {});
+        } }
+      ]
+    }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+// ---------- vault watcher ----------
+// The README promises you can edit the same vault in Obsidian. Without a watcher
+// those edits stay invisible until the user happens to press rescan.
+let watcher = null, watchTimer = null, suppressWatchUntil = 0;
+
+function touched() { suppressWatchUntil = Date.now() + 900; }   // our own writes
+
+function stopWatch() {
+  if (watcher) { try { watcher.close(); } catch {} watcher = null; }
+  clearTimeout(watchTimer);
+}
+function startWatch() {
+  stopWatch();
+  if (!settings.vaultPath) return;
+  try {
+    watcher = fs.watch(settings.vaultPath, { recursive: true }, (_evt, file) => {
+      const name = String(file || '');
+      if (name.startsWith('.synapse') || name.includes('.tmp') || name.startsWith('.')) return;
+      if (Date.now() < suppressWatchUntil) return;
+      clearTimeout(watchTimer);
+      watchTimer = setTimeout(() => {
+        log.info('vault changed on disk: ' + name);
+        for (const w of BrowserWindow.getAllWindows()) {
+          if (!w.isDestroyed()) w.webContents.send('vault-changed');
+        }
+      }, 450);
+    });
+    watcher.on('error', (err) => log.warn('vault watch error: ', err));
+    log.info('watching vault for external edits');
+  } catch (err) {
+    log.warn('could not watch vault (external edits need manual rescan): ', err);
+  }
+}
+
+// ---------- lifecycle ----------
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  // A second copy would race the first one writing the same vault files.
+  app.quit();
+} else {
+  app.on('second-instance', () => { showMain(); });
+
+  app.whenReady().then(() => {
+    log.init(app.getPath('logs'));
+    log.info('Synapse ' + app.getVersion() + ' starting on ' + process.platform);
+
+    process.on('uncaughtException', (err) => log.error('uncaughtException: ', err));
+    process.on('unhandledRejection', (reason) => log.error('unhandledRejection: ', reason));
+
+    loadSettings();
+    buildMenu();
+    mainWindow = createWindow();
+    createTray();
+    const shortcut = registerShortcut();
+    if (!shortcut.ok) {
+      mainWindow.webContents.once('did-finish-load', () =>
+        mainWindow.webContents.send('shortcut-failed', shortcut.error));
+    }
+    startWatch();
+
+    try { require('./updater').initAutoUpdate(mainWindow); }
+    catch (err) { log.warn('auto-update unavailable: ', err); }
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
+      else showMain();
+    });
+  });
+}
+
+app.on('before-quit', () => { isQuitting = true; });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); stopWatch(); });
 
 app.on('window-all-closed', () => {
+  if (settings.runInTray) return;             // living in the tray
   if (process.platform !== 'darwin') app.quit();
 });
 
 // ---------- IPC ----------
+// Every handler is wrapped so a failure is logged instead of vanishing, and
+// every path from the renderer is checked to be inside the vault.
+function handle(channel, fn) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try { return await fn(event, ...args); }
+    catch (err) {
+      log.error('ipc ' + channel + ' failed: ', err);
+      throw new Error(err && err.message ? err.message : String(err));
+    }
+  });
+}
+function inVault(relId) {
+  const abs = resolveInVault(settings.vaultPath, relId);
+  if (!abs) {
+    log.warn('refused path outside vault: ' + relId);
+    throw new Error('That file is outside your vault.');
+  }
+  return abs;
+}
+function relOf(abs) { return path.relative(settings.vaultPath, abs).split(path.sep).join('/'); }
 
-ipcMain.handle('get-vault', () => settings.vaultPath);
+handle('get-vault', () => settings.vaultPath);
 
-ipcMain.handle('choose-vault', async () => {
+handle('get-app-info', () => ({
+  version: app.getVersion(),
+  electron: process.versions.electron,
+  logFile: log.file(),
+  vaultPath: settings.vaultPath,
+  quickShortcut: settings.quickShortcut || DEFAULT_SHORTCUT,
+  quickCaptureEnabled: settings.quickCaptureEnabled !== false,
+  runInTray: !!settings.runInTray
+}));
+
+handle('choose-vault', async () => {
   const r = await dialog.showOpenDialog({
     title: 'Choose (or create) your Synapse vault folder',
     properties: ['openDirectory', 'createDirectory']
@@ -99,23 +480,29 @@ ipcMain.handle('choose-vault', async () => {
   settings.vaultPath = r.filePaths[0];
   saveSettings();
   ensureVaultScaffold();
+  vault.clearCache();
+  startWatch();
+  refreshTrayMenu();
+  buildMenu();
+  log.info('vault set to ' + settings.vaultPath);
   return settings.vaultPath;
 });
 
-ipcMain.handle('scan-vault', () => {
-  if (!settings.vaultPath) return { nodes: [], links: [], folders: [] };
-  return vault.scan(settings.vaultPath);
+handle('scan-vault', async () => {
+  if (!settings.vaultPath) return { nodes: [], links: [], folders: [], suggestions: [] };
+  return await vault.scanAsync(settings.vaultPath);
 });
 
 // Non-destructive: where WOULD this thought go? (for the live hint)
-ipcMain.handle('preview-thought', (_e, text) => {
+handle('preview-thought', (_e, text) => {
   if (!text || !text.trim()) return null;
   const d = classifier.classify(text, loadRules());
   return { folder: d.folder, reason: d.reason, score: d.score };
 });
 
-ipcMain.handle('capture-thought', (_e, text) => {
+handle('capture-thought', (_e, text) => {
   if (!settings.vaultPath) throw new Error('No vault selected.');
+  if (!text || !String(text).trim()) throw new Error('Nothing to capture.');
   const rules = loadRules();
   const decision = classifier.classify(text, rules);
   const note = classifier.buildNote(text, decision.folder, decision.matched.filter(m => m.startsWith('#')).map(m => m.slice(1)));
@@ -125,7 +512,9 @@ ipcMain.handle('capture-thought', (_e, text) => {
   let file = path.join(dir, note.slug + '.md');
   let n = 2;
   while (fs.existsSync(file)) file = path.join(dir, note.slug + '-' + n++ + '.md');
-  fs.writeFileSync(file, note.content, 'utf8');
+  touched();
+  writeFileAtomic(file, note.content, 'utf8');
+  log.info('captured into ' + decision.folder);
 
   return {
     folder: decision.folder,
@@ -133,24 +522,33 @@ ipcMain.handle('capture-thought', (_e, text) => {
     reason: decision.reason,
     score: decision.score,
     path: file,
-    id: path.relative(settings.vaultPath, file)
+    id: relOf(file),
+    folders: folderList()
   };
 });
 
-ipcMain.handle('read-note', (_e, relId) => {
-  const file = path.join(settings.vaultPath, relId);
-  return fs.readFileSync(file, 'utf8');
-});
+handle('read-note', (_e, relId) => fs.readFileSync(inVault(relId), 'utf8'));
 
-ipcMain.handle('write-note', (_e, relId, content) => {
-  const file = path.join(settings.vaultPath, relId);
-  fs.writeFileSync(file, content, 'utf8');
+handle('write-note', (_e, relId, content) => {
+  const file = inVault(relId);
+  if (typeof content !== 'string') throw new Error('Note content must be text.');
+  touched();
+  writeFileAtomic(file, content, 'utf8');
   return true;
 });
 
+// Move a note to the OS trash — recoverable, unlike an unlink.
+handle('delete-note', async (_e, relId) => {
+  const file = inVault(relId);
+  touched();
+  await shell.trashItem(file);
+  log.info('trashed ' + relId);
+  return { ok: true };
+});
+
 // Import images / PDFs: copy into <vault>/attachments and return a Markdown ref.
-ipcMain.handle('import-files', async () => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
+handle('import-files', async () => {
+  if (!settings.vaultPath) return [];
   const r = await dialog.showOpenDialog({
     title: 'Import images or PDFs',
     properties: ['openFile', 'multiSelections'],
@@ -170,6 +568,7 @@ ipcMain.handle('import-files', async () => {
       const ext = path.extname(base);
       dest = path.join(attachDir, path.basename(base, ext) + '-' + n++ + ext);
     }
+    touched();
     fs.copyFileSync(src, dest);
     const rel = path.posix.join(vault.ATTACH_DIR, path.basename(dest));
     const isImg = /\.(png|jpe?g|gif|webp|svg)$/i.test(dest);
@@ -179,26 +578,29 @@ ipcMain.handle('import-files', async () => {
 });
 
 // Save a link as its own note in a Links folder.
-ipcMain.handle('import-link', (_e, url, note) => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
+handle('import-link', (_e, url, note) => {
+  if (!settings.vaultPath) return { error: 'No vault selected.' };
+  const clean = String(url || '').trim();
+  if (!/^https?:\/\/.+/i.test(clean)) return { error: 'Only http:// and https:// links can be saved.' };
   const dir = path.join(settings.vaultPath, 'Links');
   fs.mkdirSync(dir, { recursive: true });
-  const title = (note && note.trim()) || url;
+  const title = (note && note.trim()) || clean;
   const slug = classifier.slugify(title);
   const now = new Date().toISOString();
   const body = ['---', 'title: ' + JSON.stringify(title.slice(0, 60)), 'created: ' + now,
-    'folder: Links', 'tags: [link]', '---', '', '[' + title + '](' + url + ')', '',
+    'folder: Links', 'tags: [link]', '---', '', '[' + title + '](' + clean + ')', '',
     (note || '')].join('\n');
   let file = path.join(dir, slug + '.md');
   let n = 2;
   while (fs.existsSync(file)) file = path.join(dir, slug + '-' + n++ + '.md');
-  fs.writeFileSync(file, body, 'utf8');
-  return { id: path.relative(settings.vaultPath, file), title };
+  touched();
+  writeFileAtomic(file, body, 'utf8');
+  return { id: relOf(file), title };
 });
 
 // Create a note that embeds freshly imported attachments (used when no note is open).
-ipcMain.handle('new-attachment-note', (_e, markdownBlock) => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
+handle('new-attachment-note', (_e, markdownBlock) => {
+  if (!settings.vaultPath) return { error: 'No vault selected.' };
   const dir = path.join(settings.vaultPath, 'Attachments');
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date();
@@ -207,97 +609,159 @@ ipcMain.handle('new-attachment-note', (_e, markdownBlock) => {
   const body = ['---', 'title: ' + JSON.stringify(title), 'created: ' + stamp.toISOString(),
     'folder: Attachments', 'tags: [attachment]', '---', '', markdownBlock, ''].join('\n');
   const file = path.join(dir, slug + '.md');
-  fs.writeFileSync(file, body, 'utf8');
-  return { id: path.relative(settings.vaultPath, file), title };
+  touched();
+  writeFileAtomic(file, body, 'utf8');
+  return { id: relOf(file), title };
 });
 
-ipcMain.handle('reveal', (_e, relId) => {
-  shell.showItemInFolder(path.join(settings.vaultPath, relId));
+handle('reveal', (_e, relId) => { shell.showItemInFolder(inVault(relId)); return true; });
+
+// The log lives in userData, outside the vault, so it needs its own channel
+// rather than going through the vault-containment check.
+handle('show-log', () => {
+  const f = log.file();
+  if (!f) return { ok: false };
+  shell.showItemInFolder(f);
+  return { ok: true, path: f };
 });
 
 // ---- settings ----
-ipcMain.handle('get-settings', () => ({ groupCreate: settings.groupCreate || 'both' }));
-ipcMain.handle('set-settings', (_e, patch) => {
+handle('get-settings', () => ({
+  groupCreate: settings.groupCreate || 'both',
+  quickShortcut: settings.quickShortcut || DEFAULT_SHORTCUT,
+  quickCaptureEnabled: settings.quickCaptureEnabled !== false,
+  runInTray: !!settings.runInTray
+}));
+handle('set-settings', (_e, patch) => {
+  const before = settings.quickShortcut, beforeOn = settings.quickCaptureEnabled;
   settings = Object.assign(settings, patch || {});
   saveSettings();
-  return { groupCreate: settings.groupCreate };
+  let shortcutError = null;
+  if (settings.quickShortcut !== before || settings.quickCaptureEnabled !== beforeOn) {
+    const r = registerShortcut();
+    if (!r.ok) shortcutError = r.error;
+    refreshTrayMenu(); buildMenu();
+  }
+  return {
+    groupCreate: settings.groupCreate,
+    quickShortcut: settings.quickShortcut,
+    quickCaptureEnabled: settings.quickCaptureEnabled !== false,
+    runInTray: !!settings.runInTray,
+    shortcutError
+  };
 });
 
 // ---- config / theme ----
-ipcMain.handle('get-config', () => loadConfig());
-ipcMain.handle('set-config', (_e, patch) => { const cfg = Object.assign(loadConfig(), patch || {}); saveConfig(cfg); return cfg; });
-ipcMain.handle('reset-config', () => { const cfg = Object.assign({}, DEFAULT_CONFIG); saveConfig(cfg); return cfg; });
+handle('get-config', () => loadConfig());
+handle('set-config', (_e, patch) => { const cfg = Object.assign(loadConfig(), patch || {}); saveConfig(cfg); return cfg; });
+handle('reset-config', () => { const cfg = Object.assign({}, DEFAULT_CONFIG); saveConfig(cfg); return cfg; });
 
 // ---- rules editor ----
-ipcMain.handle('get-rules', () => loadRules());
-ipcMain.handle('set-rules', (_e, rules) => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
-  const p = rulesPath(); fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(rules, null, 2)); return { ok: true };
+handle('get-rules', () => loadRules());
+handle('set-rules', (_e, rules) => {
+  if (!settings.vaultPath) return { error: 'No vault selected.' };
+  if (!rules || !Array.isArray(rules.rules)) return { error: 'Rules must have a "rules" array.' };
+  touched();
+  writeJsonAtomic(rulesPath(), rules);
+  log.info('filing rules updated');
+  return { ok: true };
+});
+
+// Nudge the rules when the user corrects a filing decision: the distinctive
+// words of a re-filed note become keywords for the folder it was moved into.
+handle('learn-filing', (_e, text, folder) => {
+  if (!settings.vaultPath || !text || !folder) return { ok: false };
+  const rules = loadRules();
+  const words = classifier.learnableTerms(text);
+  if (!words.length) return { ok: false };
+  let rule = (rules.rules || []).find(r => r.folder === folder);
+  if (!rule) { rule = { folder, keywords: [], tags: [] }; rules.rules = (rules.rules || []).concat([rule]); }
+  rule.keywords = rule.keywords || [];
+  const added = [];
+  for (const w of words) {
+    if (rule.keywords.some(k => k.toLowerCase() === w)) continue;
+    rule.keywords.push(w); added.push(w);
+    if (added.length >= 3) break;
+  }
+  if (!added.length) return { ok: false };
+  touched();
+  writeJsonAtomic(rulesPath(), rules);
+  log.info('learned ' + JSON.stringify(added) + ' -> ' + folder);
+  return { ok: true, added, folder };
 });
 
 // ---- export graph image ----
-ipcMain.handle('save-image', async (_e, dataUrl) => {
+handle('save-image', async (_e, dataUrl) => {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
+    return { ok: false, error: 'Nothing to export.' };
+  }
   const r = await dialog.showSaveDialog({ title: 'Export graph as PNG', defaultPath: 'synapse-graph.png', filters: [{ name: 'PNG', extensions: ['png'] }] });
   if (r.canceled || !r.filePath) return { ok: false };
-  fs.writeFileSync(r.filePath, Buffer.from(dataUrl.replace(/^data:image\/png;base64,/, ''), 'base64'));
+  writeFileAtomic(r.filePath, Buffer.from(dataUrl.replace(/^data:image\/png;base64,/, ''), 'base64'));
   return { ok: true, path: r.filePath };
 });
 
 // ---- frontmatter helpers (tested in fm.js) ----
 const readParent = (relId) => {
-  try { return fmlib.getParent(fs.readFileSync(path.join(settings.vaultPath, relId), 'utf8')); }
+  try { return fmlib.getParent(fs.readFileSync(inVault(relId), 'utf8')); }
   catch { return null; }
 };
 
 // set childId's parent: field to parentId (or clear if parentId is null)
-ipcMain.handle('set-parent', (_e, childId, parentId) => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
+handle('set-parent', (_e, childId, parentId) => {
+  if (!settings.vaultPath) return { ok: false, reason: 'No vault selected.' };
   if (childId === parentId) return { ok: false, reason: 'A note cannot be its own parent.' };
   if (parentId && fmlib.wouldCycle(childId, parentId, readParent)) return { ok: false, reason: 'That would create a loop.' };
-  const file = path.join(settings.vaultPath, childId);
+  const file = inVault(childId);
+  if (parentId) inVault(parentId);
   const prev = readParent(childId);
-  fs.writeFileSync(file, fmlib.setParentContent(fs.readFileSync(file, 'utf8'), parentId), 'utf8');
+  touched();
+  writeFileAtomic(file, fmlib.setParentContent(fs.readFileSync(file, 'utf8'), parentId), 'utf8');
   return { ok: true, prev: prev || null };
 });
 
 // append a [[wikilink]] to fromId's body pointing at toId's title
-ipcMain.handle('add-wikilink', (_e, fromId, toId) => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
-  const toFile = path.join(settings.vaultPath, toId);
+handle('add-wikilink', (_e, fromId, toId) => {
+  if (!settings.vaultPath) return { ok: false, reason: 'No vault selected.' };
+  const toFile = inVault(toId);
+  const fromFile = inVault(fromId);
   const { fm } = fmlib.splitFM(fs.readFileSync(toFile, 'utf8'));
   const title = (fm.title ? String(fm.title).replace(/^"|"$/g, '') : path.basename(toId, '.md'));
-  const fromFile = path.join(settings.vaultPath, fromId);
   let content = fs.readFileSync(fromFile, 'utf8');
   const link = '[[' + title + ']]';
   if (content.includes(link)) return { ok: true, already: true };
   content = content.replace(/\s*$/, '') + '\n\nRelated: ' + link + '\n';
-  fs.writeFileSync(fromFile, content, 'utf8');
+  touched();
+  writeFileAtomic(fromFile, content, 'utf8');
   return { ok: true, title };
 });
 
 // create an empty folder (group). parentDir is a relative folder id or '' for root.
-ipcMain.handle('create-folder', (_e, name, parentDir) => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
-  const safe = String(name).replace(/[\\/:*?"<>|]/g, '').trim() || 'New Group';
+handle('create-folder', (_e, name, parentDir) => {
+  if (!settings.vaultPath) return { error: 'No vault selected.' };
+  const safe = sanitizeName(name, 'New Group');
   const rel = parentDir ? parentDir + '/' + safe : safe;
-  const dir = path.join(settings.vaultPath, rel);
+  const dir = inVault(rel);
+  if (fs.existsSync(dir)) return { error: 'A group called "' + safe + '" already exists there.' };
+  touched();
   fs.mkdirSync(dir, { recursive: true });
   // drop a hidden keep-file so empty folders still appear
   const keep = path.join(dir, '.keep');
-  if (!fs.existsSync(keep)) fs.writeFileSync(keep, '');
-  return { id: rel, title: safe };
+  if (!fs.existsSync(keep)) writeFileAtomic(keep, '');
+  return { id: relOf(dir), title: safe };
 });
 
 // move selected notes into a new folder (explicit grouping)
-ipcMain.handle('group-notes', (_e, ids, folderName) => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
-  const safe = String(folderName).replace(/[\\/:*?"<>|]/g, '').trim() || 'New Group';
-  const dir = path.join(settings.vaultPath, safe);
+handle('group-notes', (_e, ids, folderName) => {
+  if (!settings.vaultPath) return { error: 'No vault selected.' };
+  const safe = sanitizeName(folderName, 'New Group');
+  const dir = inVault(safe);
   fs.mkdirSync(dir, { recursive: true });
   const moved = [];
-  for (const id of ids) {
-    const src = path.join(settings.vaultPath, id);
+  touched();
+  for (const id of ids || []) {
+    let src;
+    try { src = inVault(id); } catch { continue; }
     if (!fs.existsSync(src)) continue;
     let dest = path.join(dir, path.basename(id));
     let n = 2;
@@ -306,26 +770,63 @@ ipcMain.handle('group-notes', (_e, ids, folderName) => {
     try {
       const parts = fmlib.splitFM(fs.readFileSync(src, 'utf8'));
       parts.fm.folder = safe; if (!parts.order.includes('folder')) parts.order.push('folder');
-      fs.writeFileSync(src, fmlib.joinFM(parts), 'utf8');
-    } catch {}
+      writeFileAtomic(src, fmlib.joinFM(parts), 'utf8');
+    } catch (err) { log.warn('could not update folder field for ' + id + ': ', err); }
     fs.renameSync(src, dest);
-    moved.push({ from: id, to: path.relative(settings.vaultPath, dest).split(path.sep).join('/') });
+    moved.push({ from: id, to: relOf(dest) });
   }
   return { id: safe, moved };
 });
 
-// move a note into a folder id ('' = vault root) — used for undo & drag-to-folder
-ipcMain.handle('move-note', (_e, id, folderId) => {
-  if (!settings.vaultPath) throw new Error('No vault selected.');
-  const src = path.join(settings.vaultPath, id);
-  if (!fs.existsSync(src)) return { ok: false };
-  const destDir = path.join(settings.vaultPath, folderId || '');
+// move a note into a folder id ('' = vault root) — used for undo & re-filing
+handle('move-note', (_e, id, folderId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const src = inVault(id);
+  if (!fs.existsSync(src)) return { ok: false, error: 'That note no longer exists.' };
+  const destDir = folderId ? inVault(folderId) : path.resolve(settings.vaultPath);
   fs.mkdirSync(destDir, { recursive: true });
   let dest = path.join(destDir, path.basename(id));
-  let n = 2; while (fs.existsSync(dest) && path.relative(dest, src) !== '') { const e = path.extname(dest); dest = path.join(destDir, path.basename(id, e) + '-' + n++ + e); }
-  try { const parts = fmlib.splitFM(fs.readFileSync(src, 'utf8')); parts.fm.folder = (folderId ? folderId.split('/').pop() : 'Inbox'); if (!parts.order.includes('folder')) parts.order.push('folder'); fs.writeFileSync(src, fmlib.joinFM(parts), 'utf8'); } catch {}
+  if (path.resolve(dest) === path.resolve(src)) return { ok: true, to: id };
+  let n = 2;
+  while (fs.existsSync(dest)) { const e = path.extname(dest); dest = path.join(destDir, path.basename(id, e) + '-' + n++ + e); }
+  touched();
+  try {
+    const parts = fmlib.splitFM(fs.readFileSync(src, 'utf8'));
+    parts.fm.folder = (folderId ? folderId.split('/').pop() : 'Inbox');
+    if (!parts.order.includes('folder')) parts.order.push('folder');
+    writeFileAtomic(src, fmlib.joinFM(parts), 'utf8');
+  } catch (err) { log.warn('could not update folder field for ' + id + ': ', err); }
   fs.renameSync(src, dest);
-  return { ok: true, to: path.relative(settings.vaultPath, dest).split(path.sep).join('/') };
+  return { ok: true, to: relOf(dest) };
+});
+
+// folders that exist right now (for the re-file picker)
+function folderList() {
+  if (!settings.vaultPath) return [];
+  const out = [];
+  const stack = [{ dir: settings.vaultPath, rel: '' }];
+  while (stack.length) {
+    const { dir, rel } = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.') || e.name === vault.ATTACH_DIR || e.name === 'node_modules') continue;
+      const childRel = rel ? rel + '/' + e.name : e.name;
+      out.push(childRel);
+      stack.push({ dir: path.join(dir, e.name), rel: childRel });
+    }
+  }
+  return out.sort();
+}
+handle('list-folders', () => folderList());
+
+// ---- quick capture window ----
+handle('quick-hide', () => { if (quickWindow && !quickWindow.isDestroyed()) quickWindow.hide(); return true; });
+handle('quick-open-main', (_e, relId) => {
+  if (quickWindow && !quickWindow.isDestroyed()) quickWindow.hide();
+  showMain();
+  if (relId && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('menu-action', 'open-note:' + relId);
+  return true;
 });
 
 function ensureVaultScaffold() {

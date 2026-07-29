@@ -40,6 +40,7 @@
           <div id="searchResults" class="search-results hidden"></div>
         </div>
         <button id="newGroupBtn" class="ghost small">＋ Group</button>
+        <button id="recentsBtn" class="ghost small" title="Recent notes (Ctrl+E)">Recent</button>
         <button id="importBtn" class="ghost small">Import</button>
         <button id="linkBtn" class="ghost small">Link</button>
         <button id="fitBtn" class="ghost small" title="Fit to view (Home)">⤢</button>
@@ -73,6 +74,7 @@
         <div class="panel-head">
           <span id="panelFolder" class="pill"></span>
           <div class="panel-head-actions">
+            <span id="panelDirty" class="dirty-dot hidden" title="Unsaved changes — saved automatically">●</span>
             <button id="focusBtn" class="ghost small" title="Focus this note's neighborhood">◎</button>
             <button id="editToggle" class="ghost small">Edit</button>
             <button id="revealBtn" class="ghost small" title="Show file on disk">Reveal</button>
@@ -87,8 +89,21 @@
           <button id="saveNote" class="primary small">Save</button>
           <button id="cancelEdit" class="ghost small">Cancel</button>
         </div>
+        <div class="panel-foot">
+          <button id="moveNoteBtn" class="ghost small">Move…</button>
+          <button id="deleteNoteBtn" class="ghost small danger">Delete</button>
+        </div>
         <div id="panelBacklinks" class="panel-section"></div>
         <div id="panelSuggest" class="panel-section"></div>
+      </aside>
+
+      <!-- recent notes -->
+      <aside id="recents" class="recents hidden">
+        <div class="recents-head">
+          <h3>Recent</h3>
+          <button id="closeRecents" class="ghost small">✕</button>
+        </div>
+        <div id="recentsList" class="recents-list"></div>
       </aside>
 
       <div id="toast" class="toast hidden"></div>
@@ -144,6 +159,20 @@
           <div class="setting"><label class="switch"><input type="checkbox" id="showMinimap"> Show minimap</label></div>
           <div class="setting"><label class="switch"><input type="checkbox" id="showSuggestions"> Show suggested links (faint dashes)</label></div>
           <div class="setting">
+            <div class="setting-label">Quick capture</div>
+            <div class="setting-desc">Catch a thought from anywhere without opening the app first. Synapse stays in the tray and this hotkey opens a one-line capture bar.</div>
+            <label class="switch"><input type="checkbox" id="quickCaptureEnabled"> Enable the global hotkey</label>
+            <div class="inline-row">
+              <input id="quickShortcut" class="search" style="width:230px" placeholder="Control+Shift+Space" spellcheck="false">
+              <button id="applyShortcut" class="ghost small">Apply</button>
+            </div>
+            <div id="shortcutMsg" class="setting-desc" style="margin:8px 0 0"></div>
+          </div>
+          <div class="setting">
+            <label class="switch"><input type="checkbox" id="runInTray"> Keep running in the tray when the window is closed</label>
+            <div class="setting-desc" style="margin:4px 0 0">Off by default — closing the window quits Synapse.</div>
+          </div>
+          <div class="setting">
             <div class="setting-label">Creating groups</div>
             <label class="switch"><input type="radio" name="groupCreate" value="empty"> Empty group only</label>
             <label class="switch"><input type="radio" name="groupCreate" value="selection"> From selected notes only</label>
@@ -183,12 +212,36 @@
             • <b>Ctrl/⌘-drag</b> between notes to <b>link</b> them.<br>
             • <b>Double-click a note</b> to focus just its neighborhood.<br>
             • <b>Shift-click</b> notes to select, then group them.<br>
-            • <b>Ctrl/⌘-K</b> for the command palette · minimap bottom-right to jump around.
+            • <b>Ctrl/⌘-K</b> for the command palette · minimap bottom-right to jump around.<br>
+            • <b>Ctrl/⌘-E</b> lists recent notes · <b>Ctrl/⌘-F</b> jumps to search · <b>Ctrl/⌘-S</b> saves an edit.<br>
+            • <b>Ctrl+Shift+Space</b> (configurable) captures a thought from anywhere in Windows.
+          </div>
+          <div class="setting">
+            <div class="setting-label">About</div>
+            <div id="aboutBox" class="setting-desc"></div>
+            <button id="openLogBtn" class="ghost small">Show log file</button>
           </div>
         </div>
       </div>
     </div>
   </section>
+
+  <!-- generic input dialog (Electron has no window.prompt) -->
+  <div id="askModal" class="modal hidden">
+    <div class="modal-card ask">
+      <div class="modal-head">
+        <h3 id="askTitle"></h3>
+        <button id="askClose" class="ghost small">✕</button>
+      </div>
+      <div id="askHint" class="setting-desc hidden"></div>
+      <div id="askFields" class="ask-fields"></div>
+      <div id="askError" class="ask-error hidden"></div>
+      <div class="ask-actions">
+        <button id="askCancel" class="ghost small">Cancel</button>
+        <button id="askOk" class="primary small">OK</button>
+      </div>
+    </div>
+  </div>
 
   <script src="search.js"></script>
   <script src="graph.js"></script>

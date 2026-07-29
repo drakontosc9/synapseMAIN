@@ -37,7 +37,23 @@
       this._bind(); this._resize();
       window.addEventListener('resize', () => this._resize());
       if (window.ResizeObserver) new ResizeObserver(() => this._resize()).observe(canvas);
+
+      // The loop used to run forever, so a minimised window still burned a core
+      // and drained the battery. Sleep while the page is hidden.
+      this._awake = true;
+      if (typeof document !== 'undefined' && document.addEventListener) {
+        document.addEventListener('visibilitychange', () => this._setAwake(!document.hidden));
+        window.addEventListener('blur', () => { if (document.hidden) this._setAwake(false); });
+        window.addEventListener('focus', () => this._setAwake(true));
+      }
+
       requestAnimationFrame(() => this._tick());
+    }
+
+    _setAwake(on) {
+      if (this._awake === on) return;
+      this._awake = on;
+      if (on) { this.reheat(.3); requestAnimationFrame(() => this._tick()); }
     }
 
     setConfig(patch) { Object.assign(this.cfg, patch || {}); if (patch && patch.folderColors) this.folderColorOverride = patch.folderColors; this._sizeNodes(); this.reheat(.4); }
@@ -237,7 +253,7 @@
       // overlays in screen space
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
       if (this.cfg.showMinimap) this._drawMinimap(ctx, W, H);
-      requestAnimationFrame(() => this._tick());
+      if (this._awake !== false) requestAnimationFrame(() => this._tick());
     }
 
     _drawBackground(ctx, W, H) {
