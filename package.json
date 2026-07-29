@@ -45,8 +45,7 @@
     ],
     "win": {
       "target": [
-        "nsis",
-        "zip"
+        "nsis"
       ],
       "icon": "build/icon.ico"
     },

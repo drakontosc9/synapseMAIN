@@ -40,7 +40,6 @@ jobs:
           name: Synapse-Windows
           path: |
             dist/*.exe
-            dist/*.zip
             dist/latest.yml
 
       - name: Attach installer to Release (on version tags only)
@@ -49,5 +48,4 @@ jobs:
         with:
           files: |
             dist/*.exe
-            dist/*.zip
             dist/latest.yml
