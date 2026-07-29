@@ -16,7 +16,8 @@
     threshold: 58, ramp: 46,
     repulsion: 4200, spring: 0.02, linkTension: 1, packing: 1,
     animSpeed: 1, inertia: true, longPressMs: 2000,
-    ripples: true, showMinimap: true, showSuggestions: false
+    ripples: true, showMinimap: true, showSuggestions: false,
+    reveal: 'fade'   // 'fade' = all children fade together | 'stagger' = 1-by-1 on zoom
   };
 
   class SynapseGraph {
@@ -34,6 +35,7 @@
       this.ghost = { x: 0, y: 0 }; this._lpTimer = null; this._hoverTimer = null;
       this._bind(); this._resize();
       window.addEventListener('resize', () => this._resize());
+      if (window.ResizeObserver) new ResizeObserver(() => this._resize()).observe(canvas);
       requestAnimationFrame(() => this._tick());
     }
 
@@ -49,6 +51,10 @@
       });
       this.map = new Map(this.nodes.map(n => [n.id, n]));
       for (const n of this.nodes) n.parentRef = n.containerId ? this.map.get(n.containerId) : null;
+      // stagger order: stable index of each node among its siblings (for 1-2-3 reveal)
+      const sibs = new Map();
+      for (const n of this.nodes) { const c = n.containerId || ''; if (!sibs.has(c)) sibs.set(c, []); sibs.get(c).push(n); }
+      for (const [, arr] of sibs) { arr.sort((a, b) => a.id < b.id ? -1 : 1); arr.forEach((n, i) => { n._si = i; n._sibN = arr.length; }); }
       const byId = this.map;
       this.links = data.links.map(l => ({ source: byId.get(l.source), target: byId.get(l.target), type: l.type })).filter(l => l.source && l.target);
       this._deg = new Map();
@@ -83,7 +89,7 @@
     // ---------- physics ----------
     _step() {
       if (this.alpha < .004) return;
-      const c = this.cfg, w = this.canvas.clientWidth, h = this.canvas.clientHeight;
+      const c = this.cfg, w = this.canvas.clientWidth || 900, h = this.canvas.clientHeight || 600;
       const groups = new Map();
       for (const n of this.nodes) { if (n.type === 'root') continue; const g = n.containerId || ''; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(n); }
       for (const [, sib] of groups)
@@ -124,6 +130,29 @@
       memo.set(id, a); return a;
     }
 
+    // Per-node display alpha. In 'fade' mode this equals the container's openness
+    // (unchanged behavior). In 'stagger' mode each sibling reveals in index order
+    // as you zoom in, and fades back out in reverse as you zoom out.
+    _nodeAlpha(n, memo) {
+      const cid = n.containerId;
+      if (!cid) return 1;
+      const container = this.map.get(cid);
+      if (!container) return 1;
+      let baseChain, p;
+      if (container.type === 'root') { baseChain = 1; p = 1; }        // Vault root always open
+      else {
+        baseChain = this._containerAlpha(container.containerId, memo);
+        p = baseChain > 0 ? clamp((container.r * this.transform.k - this.cfg.threshold) / this.cfg.ramp, 0, 1) : 0;
+      }
+      if (baseChain <= 0) return 0;
+      const reveal = this.cfg.reveal === 'stagger' ? this._staggerAlpha(n, p) : p;
+      return baseChain * reveal;
+    }
+    _staggerAlpha(n, p) {
+      const N = n._sibN || 1, i = n._si || 0, feather = 1.4;          // feather = overlap between reveals
+      return clamp((p * (N + feather) - i) / feather, 0, 1);
+    }
+
     // ---------- render ----------
     _tick() {
       this._animateCamera(); this._applyInertia(); this._step();
@@ -134,7 +163,7 @@
       ctx.translate(t.x, t.y); ctx.scale(t.k, t.k);
 
       const memo = new Map();
-      const aOf = n => this._containerAlpha(n.containerId, memo);
+      const aOf = n => this._nodeAlpha(n, memo);
       const expanded = n => n.type === 'folder' && this._containerAlpha(n.id, memo) > .02;
       const focusDim = n => (this.focusSet && !this.focusSet.has(n.id)) ? .12 : 1;
 
@@ -175,8 +204,10 @@
       // notes
       const showLabel = t.k > .6;
       for (const n of this.nodes) {
-        if (n.type !== 'note') continue; const a = aOf(n) * focusDim(n); if (a <= .02) continue;
+        if (n.type !== 'note') continue;
         const hit = this.search && n.search && n.search.includes(this.search), dim = this.search && !hit;
+        let a = aOf(n) * focusDim(n); if (hit) a = Math.max(a, .9);
+        if (a <= .02) continue;
         ctx.globalAlpha = a * (dim ? .25 : 1); ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 7);
         ctx.fillStyle = this.colorFor(n.folder); ctx.fill();
         if (this.selected.has(n.id) || n === this.hover || hit || n.id === this.opened) { ctx.lineWidth = 2 / t.k; ctx.strokeStyle = '#fff'; ctx.stroke(); }
@@ -294,14 +325,14 @@
     _emitPath(id) { this.h.onBreadcrumb && this.h.onBreadcrumb(this.getPath(id)); }
 
     // ---------- hit testing ----------
-    _resize() { this.dpr = window.devicePixelRatio || 1; const r = this.canvas.getBoundingClientRect(); this.canvas.width = r.width * this.dpr; this.canvas.height = r.height * this.dpr; }
+    _resize() { const r = this.canvas.getBoundingClientRect(); if (!r.width || !r.height) return; this.dpr = window.devicePixelRatio || 1; this.canvas.width = r.width * this.dpr; this.canvas.height = r.height * this.dpr; }
     _toWorld(px, py) { const t = this.transform; return { x: (px - t.x) / t.k, y: (py - t.y) / t.k }; }
     _nodeAt(px, py) { const p = this._toWorld(px, py); return this._nodeAtWorld(p.x, p.y); }
     _nodeAtWorld(wx, wy, exclude) {
       let best = null, bestR = 1e9; const memo = new Map();
       for (const n of this.nodes) {
         if (n === exclude || n.type === 'root') continue;
-        if (this._containerAlpha(n.containerId, memo) <= .02) continue;
+        if (this._nodeAlpha(n, memo) <= .02) continue;
         const rr = n.r + 4; if ((n.x - wx) ** 2 + (n.y - wy) ** 2 <= rr * rr && n.r < bestR) { best = n; bestR = n.r; }
       }
       return best;
@@ -311,11 +342,11 @@
 
     // ---------- events ----------
     _bind() {
-      const c = this.canvas; let downX = 0, downY = 0, moved = false, downNode = null, lastT = 0, lastN = null;
+      const c = this.canvas; let downX = 0, downY = 0, moved = false, downNode = null, downOnCanvas = false, lastT = 0, lastN = null;
       const startLP = node => { this._clearLP(); this._lpTimer = setTimeout(() => { if (downNode === node && !moved && node.type === 'note') { this.held = node; this.ghost = { x: node.x, y: node.y }; this.dragNode = null; this.panning = false; this.h.onPickup && this.h.onPickup(node); } }, this.cfg.longPressMs); };
 
       c.addEventListener('mousedown', e => {
-        downX = e.offsetX; downY = e.offsetY; moved = false; this.panVel = null;
+        downOnCanvas = true; downX = e.offsetX; downY = e.offsetY; moved = false; this.panVel = null;
         if (this._inMinimap(e.offsetX, e.offsetY)) { this._minimapJump(e.offsetX, e.offsetY); this.panning = false; downNode = null; return; }
         const n = this._nodeAt(e.offsetX, e.offsetY); downNode = n;
         if (n && (e.ctrlKey || e.metaKey) && n.type === 'note') { this.linkFrom = n; this.ghost = this._toWorld(e.offsetX, e.offsetY); return; }
@@ -343,11 +374,11 @@
           else if (dbl && downNode.type === 'note') { this.setFocus(downNode.id); this.h.onFocusGraph && this.h.onFocusGraph(downNode); }
           else if (downNode.type === 'folder') this._zoomToNode(downNode);
           else if (downNode.type === 'note') { this.opened = downNode.id; this.h.onNodeClick && this.h.onNodeClick(downNode); }
-        } else if (!moved && !downNode) {
+        } else if (!moved && !downNode && downOnCanvas) {
           if (this.cfg.ripples) this.rippleAt(this._toWorld(ox, oy).x, this._toWorld(ox, oy).y, this.cfg.palette[0], 4, 60);
           this.h.onBackgroundClick && this.h.onBackgroundClick();
         }
-        this.dragNode = null; this.panning = false; downNode = null; c.style.cursor = this.hover ? 'pointer' : 'grab';
+        this.dragNode = null; this.panning = false; downNode = null; downOnCanvas = false; c.style.cursor = this.hover ? 'pointer' : 'grab';
       });
 
       c.addEventListener('wheel', e => {

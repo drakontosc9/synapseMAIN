@@ -25,5 +25,6 @@ contextBridge.exposeInMainWorld('synapse', {
   addWikilink:    (from, to)     => ipcRenderer.invoke('add-wikilink', from, to),
   createFolder:   (name, parent) => ipcRenderer.invoke('create-folder', name, parent),
   groupNotes:     (ids, name)    => ipcRenderer.invoke('group-notes', ids, name),
-  moveNote:       (id, folderId) => ipcRenderer.invoke('move-note', id, folderId)
+  moveNote:       (id, folderId) => ipcRenderer.invoke('move-note', id, folderId),
+  onUpdateStatus: (cb)           => ipcRenderer.on('update-status', (_e, d) => cb(d))
 });

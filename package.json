@@ -11,6 +11,9 @@
     "dist": "electron-builder --publish never",
     "dist:win": "electron-builder --win --publish never"
   },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
   "devDependencies": {
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3"
@@ -18,6 +21,13 @@
   "build": {
     "appId": "com.ivan.synapse",
     "productName": "Synapse",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "drakontosc9",
+        "repo": "synapseMAIN"
+      }
+    ],
     "directories": {
       "output": "dist",
       "buildResources": "build-resources"
@@ -25,6 +35,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "updater.js",
       "classifier.js",
       "vault.js",
       "fm.js",

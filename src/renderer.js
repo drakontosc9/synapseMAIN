@@ -38,6 +38,11 @@ const THEMES = {
   wireCapture(); wireWorkspace(); wireSettings(); wirePalette();
   applyConfig(config);
   applySettingsToUI();
+  if (api.onUpdateStatus) api.onUpdateStatus(d => {
+    if (d.state === 'available') toast('Update <b>' + d.version + '</b> found — downloading…');
+    else if (d.state === 'downloading' && d.percent % 25 === 0) toast('Downloading update… ' + d.percent + '%');
+    else if (d.state === 'ready') toast('Update <b>' + d.version + '</b> ready — restart to install');
+  });
   await refresh();
 })();
 
@@ -58,7 +63,7 @@ function applyConfig(cfg) {
     threshold: config.threshold, ramp: config.ramp, repulsion: config.repulsion, spring: config.spring,
     linkTension: config.linkTension, packing: config.packing, animSpeed: config.animSpeed, inertia: config.inertia,
     longPressMs: config.longPressMs, ripples: config.ripples, showMinimap: config.showMinimap,
-    showSuggestions: config.showSuggestions, folderColors: config.folderColors || {}
+    showSuggestions: config.showSuggestions, reveal: config.reveal || 'fade', folderColors: config.folderColors || {}
   });
   syncControls();
 }
@@ -357,6 +362,7 @@ function wireSettings() {
 
   const bindToggle = (id, key) => el(id).addEventListener('change', e => updateConfig({ [key]: e.target.checked }));
   ['ripples', 'sound', 'showMinimap', 'showSuggestions', 'inertia'].forEach(k => bindToggle(k, k));
+  el('stagger').addEventListener('change', e => updateConfig({ reveal: e.target.checked ? 'stagger' : 'fade' }));
   const bindRange = (id, key, fmt) => { el(id).addEventListener('input', e => { const v = parseFloat(e.target.value); el(id + 'V') && (el(id + 'V').textContent = fmt ? fmt(v) : v); updateConfig({ [key]: v }); }); };
   bindRange('nodeScale', 'nodeScale'); bindRange('labelScale', 'labelScale'); bindRange('threshold', 'threshold');
   bindRange('repulsion', 'repulsion'); bindRange('linkTension', 'linkTension'); bindRange('packing', 'packing');
@@ -374,6 +380,7 @@ function syncControls() {
   set('threshold', config.threshold); set('repulsion', config.repulsion); set('linkTension', config.linkTension);
   set('packing', config.packing); set('animSpeed', config.animSpeed); set('longPressMs', config.longPressMs);
   set('ripples', config.ripples); set('sound', config.sound); set('showMinimap', config.showMinimap); set('showSuggestions', config.showSuggestions); set('inertia', config.inertia);
+  { const s = el('stagger'); if (s) s.checked = config.reveal === 'stagger'; }
   document.querySelectorAll('#themeRow .chip').forEach(c => c.classList.toggle('active', c.dataset.theme === config.theme));
   document.querySelectorAll('#bgRow .chip').forEach(c => c.classList.toggle('active', c.dataset.bg === config.background));
   renderFolderColors();

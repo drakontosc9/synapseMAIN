@@ -37,6 +37,7 @@ const DEFAULT_CONFIG = {
   repulsion: 4200, spring: 0.02, linkTension: 1, packing: 1,
   animSpeed: 1, inertia: true, longPressMs: 2000,
   ripples: true, sound: false, showMinimap: true, showSuggestions: false,
+  reveal: 'fade',
   folderColors: {}
 };
 function configPath() { return settings.vaultPath ? path.join(settings.vaultPath, '.synapse', 'config.json') : null; }
@@ -74,7 +75,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   loadSettings();
-  createWindow();
+  const win = createWindow();
+  try { require('./updater').initAutoUpdate(win); } catch {}
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

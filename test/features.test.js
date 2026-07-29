@@ -160,6 +160,19 @@ console.log('\nv0.3 vault: master root + suggestions:');
   truthy('setConfig rescales note nodes', g.map.get('Ideas/a.md').r > 6);
   g.fit();
   truthy('fit frames the vault root children', !!g.anim);
+
+  // staggered reveal: earlier sibling fades in before later one at mid-zoom
+  g.anim = null;
+  const A = g.map.get('Ideas/a.md'), B = g.map.get('Ideas/b.md'), F = g.map.get('Ideas');
+  g.transform.k = (g.cfg.threshold + g.cfg.ramp * 0.4) / F.r;   // folder ~40% open
+  g.setConfig({ reveal: 'fade' });
+  const fA = g._nodeAlpha(A, new Map()), fB = g._nodeAlpha(B, new Map());
+  truthy('fade mode: siblings reveal together (equal alpha)', Math.abs(fA - fB) < 1e-6);
+  g.setConfig({ reveal: 'stagger' });
+  const sA = g._nodeAlpha(A, new Map()), sB = g._nodeAlpha(B, new Map());
+  const first = A._si < B._si ? sA : sB, second = A._si < B._si ? sB : sA;
+  truthy('stagger mode: earlier sibling more visible mid-zoom', first > second + 0.1);
+  truthy('stagger mode: all revealed when fully zoomed in', (g.transform.k = 5, g._nodeAlpha(A, new Map()) > 0.9 && g._nodeAlpha(B, new Map()) > 0.9));
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
