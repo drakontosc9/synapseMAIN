@@ -40,6 +40,9 @@ contextBridge.exposeInMainWorld('synapse', {
   createNote:     (text, folderId, opts) => ipcRenderer.invoke('create-note', text, folderId, opts),
   importPaths:    (paths, opts)  => ipcRenderer.invoke('import-paths', paths, opts),
   importImageBuffer: (bytes, name, folderId) => ipcRenderer.invoke('import-image-buffer', bytes, name, folderId),
+  attachToNote:   (relId, paths, opts) => ipcRenderer.invoke('attach-to-note', relId, paths, opts),
+  breakdownFile:  (paths, folderId) => ipcRenderer.invoke('breakdown-file', paths, folderId),
+  pickFiles:      (title)        => ipcRenderer.invoke('pick-files', title),
   pathsForFiles:  (files)        => Array.from(files || []).map(pathForFile).filter(Boolean),
 
   // folders

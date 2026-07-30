@@ -298,6 +298,212 @@ app.whenReady().then(async () => {
     'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="importPaths"})||{}).args[0])'),
     '["C:/tmp/a.txt","C:/tmp/b.png"]');
 
+  console.log('\ncapture: Enter must never insert a newline:');
+  await js('window.synapse.__reset()');
+  const fireCapture = (props) => js(
+    '(function(){var t=document.getElementById("thought");' +
+    'var e=new KeyboardEvent("keydown",Object.assign({key:"Enter",bubbles:true,cancelable:true},' + JSON.stringify(props || {}) + '));' +
+    'Object.defineProperty(e,"target",{value:t});' +
+    't.dispatchEvent(e);return e.defaultPrevented})()');
+
+  await js('document.getElementById("thought").value = "a real thought"');
+  ok('plain Enter is swallowed', await fireCapture(), true);
+  await wait(300);
+  ok('and it captured', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="captureThought"})||{}).args)'),
+    '["a real thought"]');
+
+  await js('window.synapse.__reset()');
+  await js('document.getElementById("thought").value = "shift stays a newline"');
+  ok('Shift+Enter is left alone', await fireCapture({ shiftKey: true }), false);
+  ok('Shift+Enter does not capture', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="captureThought"}).length'), 0);
+
+  await js('document.getElementById("thought").value = "   "');
+  ok('whitespace-only Enter still swallowed', await fireCapture(), true);
+  ok('and captures nothing', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="captureThought"}).length'), 0);
+
+  // the two paths that used to leak a newline through
+  await js('document.getElementById("thought").value = "mid ime"');
+  ok('IME composition is swallowed, not captured', await fireCapture({ keyCode: 229 }), false);
+  ok('IME does not capture', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="captureThought"}).length'), 0);
+  ok('numpad Enter (keyCode 13, no key) is swallowed', await js(
+    '(function(){var t=document.getElementById("thought");t.value="numpad";' +
+    'var e=new KeyboardEvent("keydown",{bubbles:true,cancelable:true});' +
+    'Object.defineProperty(e,"keyCode",{value:13});' +
+    'Object.defineProperty(e,"target",{value:t});' +
+    't.dispatchEvent(e);return e.defaultPrevented})()'), true);
+  await wait(250);
+
+  await js('window.synapse.__reset()');
+  await js('document.getElementById("thought").value = "double fire"');
+  await js('capturing = true');                      // simulate a capture in flight
+  ok('re-entrant Enter is swallowed', await fireCapture(), true);
+  ok('but does not double-submit', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="captureThought"}).length'), 0);
+  await js('capturing = false');
+
+  console.log('\nworkspace tabs:');
+  await js('window.synapse.__reset()');
+  await js('lastScan = {folders:["Ideas","Sub"],suggestions:[],links:[' +
+    '{source:"Ideas/a.md",target:"Ideas/Sub/c.md",type:"wikilink"},' +
+    '{source:"Ideas/a.md",target:"Tasks/t.md",type:"wikilink"}],nodes:[' +
+    '{id:"__root__",type:"root",title:"Vault",containerId:null,noteCount:3},' +
+    '{id:"Ideas",type:"folder",title:"Ideas",containerId:"__root__",folder:"Ideas",noteCount:2},' +
+    '{id:"Ideas/Sub",type:"folder",title:"Sub",containerId:"Ideas",folder:"Sub",noteCount:1},' +
+    '{id:"Tasks",type:"folder",title:"Tasks",containerId:"__root__",folder:"Tasks",noteCount:1},' +
+    '{id:"Ideas/a.md",type:"note",title:"A",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10},' +
+    '{id:"Ideas/Sub/c.md",type:"note",title:"C",containerId:"Ideas/Sub",folder:"Sub",tags:[],links:[],mass:10},' +
+    '{id:"Tasks/t.md",type:"note",title:"T",containerId:"Tasks",folder:"Tasks",tags:[],links:[],mass:10}' +
+    ']}');
+  // stash it: several flows call refresh(), which reloads from the stub's empty
+  // vault and wipes both lastScan and the graph
+  await js('window.__fx = lastScan; graph.setData(lastScan)');
+  await wait(100);
+
+  ok('master tab exists and is pinned', await js('tabs[0].pinned === true && tabs[0].scopeId === ""'), true);
+
+  // scoping
+  ok('unscoped data passes through whole', await js('scopeData(lastScan,"").nodes.length'), 7);
+  ok('scoped to Ideas keeps its subtree', await js(
+    'scopeData(lastScan,"Ideas").nodes.map(function(n){return n.id}).sort().join(",")'),
+    'Ideas,Ideas/Sub,Ideas/Sub/c.md,Ideas/a.md,__root__');
+  ok('scoped view excludes other folders', await js(
+    'scopeData(lastScan,"Ideas").nodes.some(function(n){return n.id==="Tasks/t.md"})'), false);
+  ok('scope folder re-parents onto the root', await js(
+    'scopeData(lastScan,"Ideas").nodes.find(function(n){return n.id==="Ideas"}).containerId'), '__root__');
+  ok('links crossing the scope are dropped', await js('scopeData(lastScan,"Ideas").links.length'), 1);
+  ok('root note count is rescoped', await js(
+    'scopeData(lastScan,"Ideas").nodes.find(function(n){return n.type==="root"}).noteCount'), 2);
+  ok('a missing scope is reported', await js('scopeData(lastScan,"Ghost").missing'), true);
+
+  // spawning
+  // the default set is Master + the pinned Breakdown tab, so a new scope tab is the third
+  const baseTabs = await js('tabs.length');
+  await js('openTabForNode(graph.map.get("Ideas") || {id:"Ideas",type:"folder",title:"Ideas"})');
+  await wait(200);
+  ok('a scope tab was added', await js('tabs.length'), baseTabs + 1);
+  ok('it is scoped to the folder', await js(
+    'tabs.filter(function(t){return t.scopeId==="Ideas"}).length'), 1);
+  ok('and became active', await js(
+    'activeTabId === tabs.find(function(t){return t.scopeId==="Ideas"}).id'), true);
+  ok('tab chips rendered', await js('document.querySelectorAll("#tabs .wtab").length'), baseTabs + 1);
+  ok('active chip marked', await js(
+    'document.querySelector("#tabs .wtab.active").dataset.tab === tabs.find(function(t){return t.scopeId==="Ideas"}).id'), true);
+
+  ok('re-opening the same folder reuses its tab', await js(
+    '(function(){openTabForNode({id:"Ideas",type:"folder",title:"Ideas"});return tabs.length})()'), baseTabs + 1);
+
+  // split view
+  await js('toggleSplit()');
+  await wait(200);
+  ok('split turns the second pane on', await js(
+    '!document.getElementById("paneB").classList.contains("hidden")'), true);
+  ok('split tab is set', await js('splitTabId !== null'), true);
+  ok('panes container marked split', await js(
+    'document.querySelector(".panes").classList.contains("split")'), true);
+  ok('pane B has its own graph instance', await js('panes.b !== panes.a && !!panes.b'), true);
+  ok('badges name each pane', await js('document.getElementById("badgeB").textContent.length > 0'), true);
+
+  await js('focusPane("b")');
+  ok('focusing a pane repoints the active graph', await js('graph === panes.b'), true);
+  await js('focusPane("a")');
+
+  await js('toggleSplit()');
+  await wait(150);
+  ok('split toggles back off', await js('splitTabId === null'), true);
+  ok('pane B hidden again', await js(
+    'document.getElementById("paneB").classList.contains("hidden")'), true);
+
+  // cross-tab routing
+  console.log('\ncross-tab routing:');
+  // route from the Master tab — a scoped tab legitimately cannot see notes
+  // outside its own subtree
+  await js('activateTab(tabs[0].id)');
+  await wait(200);
+  ok('master tab sees the whole vault', await js('!!graph.map.get("Tasks/t.md")'), true);
+  await js('window.synapse.__reset()');
+  const barBox = await js('JSON.stringify(document.getElementById("tabbar").getBoundingClientRect())');
+  const bar = JSON.parse(barBox);
+  const chip = JSON.parse(await js(
+    'JSON.stringify(document.querySelector(\'#tabs .wtab[data-tab="\' + ' +
+    'tabs.find(function(t){return t.scopeId==="Ideas"}).id + \'"]\').getBoundingClientRect())'));
+  ok('drop over a tab chip is consumed', await js(
+    'onDropOutside("Tasks/t.md",' + (chip.left + chip.width / 2) + ',' + (chip.top + chip.height / 2) + ')'), true);
+  await wait(300);
+  ok('routed note moved into that tab folder', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="moveNote"})||{}).args)'),
+    '["Tasks/t.md","Ideas"]');
+  ok('drop far below the bar is not consumed', await js(
+    'onDropOutside("Tasks/t.md",' + (chip.left + 5) + ',' + (bar.bottom + 400) + ')'), false);
+
+  console.log('\nbreakdown tab + file drop routing:');
+  ok('breakdown tab exists and is pinned', await js(
+    '(function(){var t=tabs.find(function(x){return x.kind==="ingest"});return !!t && t.pinned})()'), true);
+  ok('its chip is styled as an ingest tab', await js(
+    '!!document.querySelector("#tabs .wtab.ingest")'), true);
+
+  // drop onto a note => attach
+  await js('window.synapse.__reset()');
+  await js('activateTab(tabs[0].id)');
+  await wait(150);
+  // routeDroppedNode above called refresh(), which reloads from the stub's empty
+  // vault — put the fixture back before asking where nodes are on screen
+  await js('lastScan = window.__fx; graph.setData(lastScan)');
+  await wait(200);
+  ok('fixture note is back in the graph', await js('!!graph.map.get("Ideas/a.md")'), true);
+  const noteScreen = JSON.parse(await js(
+    '(function(){var n=graph.map.get("Ideas/a.md");var r=graph.canvas.getBoundingClientRect();' +
+    'var t=graph.transform;return JSON.stringify({x:r.left+n.x*t.k+t.x,y:r.top+n.y*t.k+t.y})})()'));
+  ok('a note is the drop target under the cursor', await js(
+    'dropTargetAt(' + noteScreen.x + ',' + noteScreen.y + ').kind'), 'note');
+  await js('routeDroppedFiles(["C:/tmp/spec.txt"],' + noteScreen.x + ',' + noteScreen.y + '); 0');
+  await wait(350);
+  ok('files attach to the note under the cursor', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="attachToNote"})||{}).args.slice(0,2))'),
+    '["Ideas/a.md",["C:/tmp/spec.txt"]]');
+
+  // drop onto the breakdown tab chip => breakdown
+  await js('window.synapse.__reset()');
+  const ingestChip = JSON.parse(await js(
+    'JSON.stringify(document.querySelector("#tabs .wtab.ingest").getBoundingClientRect())'));
+  ok('the ingest chip is recognised as a drop target', await js(
+    'dropTargetAt(' + (ingestChip.left + ingestChip.width / 2) + ',' + (ingestChip.top + ingestChip.height / 2) + ').tab.kind'), 'ingest');
+  await js('routeDroppedFiles(["C:/tmp/report.txt"],' +
+    (ingestChip.left + ingestChip.width / 2) + ',' + (ingestChip.top + ingestChip.height / 2) + '); 0');
+  await wait(400);
+  ok('dropping on it breaks the file down', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="breakdownFile"})||{}).args)'),
+    '[["C:/tmp/report.txt"],"Breakdown"]');
+  ok('it does not fall through to a plain import', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="importPaths"}).length'), 0);
+
+  // with the breakdown tab active, any drop is broken down
+  await js('window.synapse.__reset()');
+  await js('activateTab(tabs.find(function(t){return t.kind==="ingest"}).id)');
+  await wait(200);
+  await js('routeDroppedFiles(["C:/tmp/loose.txt"], 5, 9999); 0');
+  await wait(400);
+  ok('active breakdown tab claims loose drops', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="breakdownFile"}).length'), 1);
+
+  await js('activateTab(tabs[0].id)');
+  await wait(150);
+
+  // pruning
+  console.log('\ntab pruning:');
+  await js('lastScan = {folders:[],links:[],suggestions:[],nodes:[{id:"__root__",type:"root",title:"Vault",containerId:null}]}');
+  await js('pruneTabs()');
+  await wait(150);
+  ok('tab for a vanished folder is closed', await js(
+    'tabs.filter(function(t){return t.scopeId==="Ideas"}).length'), 0);
+  ok('pinned tabs survive', await js('tabs.every(function(t){return t.pinned})'), true);
+  ok('master survives', await js('!!tabs.find(function(t){return t.id==="master"})'), true);
+  ok('breakdown survives', await js('!!tabs.find(function(t){return t.kind==="ingest"})'), true);
+  ok('active falls back to a surviving tab', await js('!!tabs.find(function(t){return t.id===activeTabId})'), true);
+
   console.log('\nquick capture window:');
   const qwin = new BrowserWindow({
     show: false,

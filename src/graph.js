@@ -680,6 +680,8 @@
           // live target highlight while dragging a note over something droppable
           this.dropTarget = (this.dragNode.type === 'note' && moved)
             ? this._nodeAtWorld(wp.x, wp.y, this.dragNode) : null;
+          // dragging up out of the canvas can mean "spawn / route to a tab"
+          if (moved && this.h.onDragOutside) this.h.onDragOutside(e.clientX, e.clientY);
         }
         else if (this.panning) { this.transform.x += e.movementX; this.transform.y += e.movementY; this.anim = null; this.panVel = { x: e.movementX, y: e.movementY }; }
         else { const prev = this.hover; this.hover = this._nodeAt(ox, oy); c.style.cursor = this.hover ? 'pointer' : 'grab'; if (this.hover !== prev) this._hoverChanged(ox, oy); }
@@ -704,6 +706,17 @@
           }
           this.dragNode = null; this.panning = false; downNode = null; downOnCanvas = false;
           return;
+        }
+
+        // Dropped outside the canvas (the tab bar) — the host decides what that
+        // means: spawn a tab, or route the note into another tab's folder.
+        if (this.dragNode && moved && this.h.onDropOutside) {
+          const consumed = this.h.onDropOutside(this.dragNode.id, e.clientX, e.clientY);
+          if (consumed) {
+            this.dragNode = null; this.dropTarget = null; this.panning = false;
+            downNode = null; downOnCanvas = false; this.reheat(.5);
+            return;
+          }
         }
 
         // Dropping a dragged note onto something is the "caveman" gesture:

@@ -146,6 +146,62 @@ app.whenReady().then(async () => {
     ok('unreadable path is skipped, not fatal', missing.skipped.length, 1);
   }
 
+  console.log('\nattach-to-note:');
+  {
+    writeNote('Concepts/host.md', 'Host', 'original body');
+    const txt = path.join(os.tmpdir(), 'attach-' + Date.now() + '.txt');
+    fs.writeFileSync(txt, 'appended content here');
+    const img = path.join(os.tmpdir(), 'attach-' + Date.now() + '.png');
+    fs.writeFileSync(img, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const r = await invoke('attach-to-note', 'Concepts/host.md', [txt, img], { alsoChildNotes: true });
+    ok('both files attached', r.attached.length, 2);
+    const body = fs.readFileSync(rel('Concepts', 'host.md'), 'utf8');
+    truthy('original body preserved', body.indexOf('original body') >= 0);
+    truthy('text file inlined', body.indexOf('appended content here') >= 0);
+    truthy('binary embedded as a link', body.indexOf('attachments/') >= 0);
+    ok('binary also became a child note', r.children.length, 1);
+    const child = fs.readFileSync(rel(r.children[0].id), 'utf8');
+    truthy('child points back at the host', child.indexOf('Concepts/host.md') >= 0);
+
+    let threw = null;
+    await invoke('attach-to-note', '../outside.md', [txt], {}).catch(e => { threw = e.message; });
+    truthy('refuses a host outside the vault', threw && threw.indexOf('outside') >= 0);
+  }
+
+  console.log('\nbreakdown-file:');
+  {
+    const doc = path.join(os.tmpdir(), 'breakdown-' + Date.now() + '.txt');
+    fs.writeFileSync(doc, [
+      'Kickoff notes.',
+      '- hire the contractor',
+      '- order the parts',
+      'TODO: book the venue'
+    ].join('\n'));
+
+    const r = await invoke('breakdown-file', [doc], 'Breakdown');
+    ok('one document produced', r.docs.length, 1);
+    truthy('several parts extracted', r.docs[0].parts.length >= 3);
+    truthy('document note exists', fs.existsSync(rel(r.docs[0].doc.id)));
+
+    const partBody = fs.readFileSync(rel(r.docs[0].parts[0].id), 'utf8');
+    truthy('parts are parented to the document', partBody.indexOf(r.docs[0].doc.id) >= 0);
+    truthy('parts carry a kind tag', /#(point|action|highlight)/.test(partBody));
+
+    const summary = fs.readFileSync(rel(r.docs[0].doc.id), 'utf8');
+    truthy('document note names the source', summary.indexOf(path.basename(doc)) >= 0);
+
+    // binary files cannot be read into parts, but must still be filed
+    const bin = path.join(os.tmpdir(), 'blob-' + Date.now() + '.png');
+    fs.writeFileSync(bin, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const b = await invoke('breakdown-file', [bin], 'Breakdown');
+    ok('binary yields a document with no parts', b.docs[0].parts.length, 0);
+    truthy('and says why', b.docs[0].note.indexOf('binary') >= 0);
+
+    const gone = await invoke('breakdown-file', ['C:/nope/missing.txt'], 'Breakdown');
+    ok('missing file is skipped, not fatal', gone.skipped.length, 1);
+  }
+
   console.log('\nburner expiry:');
   {
     writeNote('Concepts/dead.md', 'Expired', 'gone soon', { expires: '2000-01-01T00:00:00.000Z' });

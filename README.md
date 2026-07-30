@@ -88,9 +88,47 @@ where they were:
 | **My Skills** | Prerequisite tree — depth from the `parent:` chain, laid out in tidy rows |
 | **Knowledge** | Dense encyclopedic clusters, one tight grid per subject |
 
+### Workspace tabs
+
+The vault is one thing; a tab is a *view* over it. Tabs are stored with the vault, so
+your workspaces travel with your notes.
+
+- **Master** (pinned) shows the whole vault.
+- **Scoped tabs** show one folder subtree — its notes, its sub-folders, and only the links
+  between them.
+- **Tactile spawning** — drag a folder bubble onto the tab bar to open it in its own tab, or
+  right-click → *Open in a new tab*.
+- **Cross-tab routing** — drag a note onto another tab's chip and it is filed into that
+  tab's folder. One gesture moves an idea between maps.
+- **Split panes** — `Ctrl+\` puts two tabs side by side, each with its own camera, lens and
+  physics. Click a pane to make it the active one.
+- **Headless background tabs** — only the panes on screen own a graph instance, so inactive
+  tabs cost nothing at all.
+
+Tabs whose folder is renamed or deleted elsewhere close themselves rather than lingering
+as dead views.
+
+### The Breakdown tab
+
+A pinned tab with an opinion: **anything you drop on it gets torn into its important parts.**
+Drop a file on its chip, or drop anything while it is the active tab.
+
+- Documents with **headings** split one note per section.
+- Otherwise Synapse mines **bullet and numbered list items**, then lines that read like
+  decisions or actions (`TODO`, `decided`, `deadline`, `owner`, `risk`, `blocker`…).
+- Failing both, it takes the **densest sentences** in the prose.
+
+Each part becomes a child note tagged `#point` / `#action` / `#highlight`, all parented to a
+single document node — so the file arrives as a small map instead of a wall of text. Binary
+files can't be read into parts, so they're filed whole and told you so.
+
 ### Ingestion
 
-- **Drag and drop** files anywhere onto the window; drop inside a folder bubble to import there.
+- **Drag and drop** files anywhere onto the window. Where you drop decides what happens:
+  onto a **note** attaches them to it (text is inlined, files are embedded and optionally
+  become child notes), onto a **folder bubble** imports there, onto a **tab chip** imports
+  into that tab, and onto the **Breakdown** tab takes the file apart. The drop banner names
+  the target before you let go.
 - **Paste images** straight from the clipboard — they land in `attachments/` wrapped in a note.
 - **Auto-split Markdown** — importing a `.md` can break it into linked sub-notes, one per
   heading (or per paragraph if it has none), each parented to the source document.
@@ -113,6 +151,10 @@ and every 15 minutes.
 | `Ctrl+Shift+N` | Spawn a thought inside the graph |
 | `Ctrl+L` | Cycle the layout lens |
 | `Ctrl+A` | Select every visible note |
+| `Ctrl+T` | Open the current folder in a new tab |
+| `Ctrl+W` | Close the current tab |
+| `Ctrl+Tab` | Next tab (`Ctrl+Shift+Tab` for previous) |
+| `Ctrl+\` | Toggle split view |
 | `Ctrl+K` | Command palette |
 | `Ctrl+F` | Jump to search |
 | `Ctrl+E` | Recent notes |
@@ -120,7 +162,7 @@ and every 15 minutes.
 | `Ctrl+Z` | Undo the last graph change (never steals undo from a text field) |
 | `Ctrl+0` | Fit graph to view |
 | `Ctrl+R` | Reload the vault from disk |
-| `Ctrl+T` | Cycle theme |
+| `Ctrl+Shift+T` | Cycle theme |
 | `Esc` | Close the topmost dialog, palette or menu |
 
 ## Run it
@@ -217,7 +259,6 @@ Everything is a plain file you own, and Synapse tries hard not to lose any of it
 
 ## Roadmap ideas
 
-- Workspace tabs & multi-graph engine (tactile tab spawning, cross-tab routing, split panes)
 - Mitosis animations for merge/split transitions
 - Image / PDF thumbnails and in-node file previews
 - Timeline / "what did I think about this week" time-lapse

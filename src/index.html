@@ -50,8 +50,18 @@
       </div>
     </header>
 
+    <!-- workspace tabs -->
+    <div id="tabbar" class="tabbar">
+      <div id="tabs" class="tabs-row"></div>
+      <button id="splitTab" class="tab-btn" title="Split view — compare two maps side by side">⫿</button>
+      <button id="newTab" class="tab-btn" title="New tab">＋</button>
+    </div>
+
     <div class="stage">
-      <canvas id="graph"></canvas>
+      <div class="panes">
+        <div class="pane" id="paneA"><canvas id="graph"></canvas><div class="pane-badge" id="badgeA"></div></div>
+        <div class="pane hidden" id="paneB"><canvas id="graph2"></canvas><div class="pane-badge" id="badgeB"></div></div>
+      </div>
       <div class="legend" id="legend"></div>
 
       <!-- lens engine: one-click structural reshape -->

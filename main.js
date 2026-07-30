@@ -65,7 +65,9 @@ const DEFAULT_CONFIG = {
   animSpeed: 1, inertia: true, longPressMs: 2000,
   ripples: true, sound: false, showMinimap: true, showSuggestions: false,
   reveal: 'fade', edgeStyle: 'curved',
-  folderColors: {}
+  folderColors: {},
+  // workspace tabs travel with the vault
+  tabs: [], activeTabId: null, splitTabId: null
 };
 function configPath() { return settings.vaultPath ? path.join(settings.vaultPath, '.synapse', 'config.json') : null; }
 function loadConfig() {
@@ -331,7 +333,12 @@ function buildMenu() {
         { label: 'Reload vault from disk', accelerator: 'CmdOrCtrl+R', click: send('rescan') },
         { label: 'Recent notes', accelerator: 'CmdOrCtrl+E', click: send('recents') },
         { type: 'separator' },
-        { label: 'Cycle theme', accelerator: 'CmdOrCtrl+T', click: send('cycle-theme') },
+        { label: 'New tab from selection', accelerator: 'CmdOrCtrl+T', click: send('new-tab') },
+        { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: send('close-tab') },
+        { label: 'Toggle split view', accelerator: 'CmdOrCtrl+\\', click: send('split') },
+        { label: 'Cycle layout lens', accelerator: 'CmdOrCtrl+L', click: send('cycle-lens') },
+        { type: 'separator' },
+        { label: 'Cycle theme', accelerator: 'CmdOrCtrl+Shift+T', click: send('cycle-theme') },
         { role: 'togglefullscreen' },
         { type: 'separator' },
         { label: 'Reload window', accelerator: 'CmdOrCtrl+Shift+R', click: () => mainWindow && mainWindow.reload() },
@@ -397,6 +404,12 @@ function startWatch() {
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   // A second copy would race the first one writing the same vault files.
+  // Log it before quitting: if the holder is a zombie with no window, the user
+  // sees an app that "won't start" and otherwise has nothing to go on.
+  try {
+    log.init(app.getPath('logs'));
+    log.warn('another Synapse instance already holds the lock — focusing it and exiting');
+  } catch {}
   app.quit();
 } else {
   app.on('second-instance', () => { showMain(); });
@@ -1033,6 +1046,117 @@ function writeNoteFile(dir, rawTitle, body, folder, parentId) {
   writeFileAtomic(file, lines.join('\n'), 'utf8');
   return { id: relOf(file), title };
 }
+
+/**
+ * Drop files onto an existing note. Text is appended into the note's body;
+ * anything else is copied to attachments/ and embedded. Optionally each file
+ * also becomes a child note so it shows up in the graph.
+ */
+handle('attach-to-note', (_e, relId, paths, opts) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const file = inVault(relId);
+  const o = opts || {};
+  const dir = path.dirname(file);
+  const attached = [], children = [], skipped = [];
+  let appended = '';
+  touched();
+
+  for (const src of (paths || [])) {
+    let stat;
+    try { stat = fs.statSync(src); } catch { skipped.push({ path: src, why: 'unreadable' }); continue; }
+    if (stat.isDirectory()) { skipped.push({ path: src, why: 'folders are not attached' }); continue; }
+    const ext = path.extname(src).toLowerCase();
+    const base = path.basename(src, ext);
+    try {
+      if (TEXTUAL.has(ext) && !o.asAttachment) {
+        const raw = fs.readFileSync(src, 'utf8');
+        appended += '\n\n## ' + base + '\n\n' + raw.trim() + '\n';
+        attached.push({ name: path.basename(src), kind: 'text' });
+      } else {
+        const att = copyToAttachments(src);
+        appended += '\n\n' + att.markdown + '\n';
+        attached.push({ name: att.name, kind: 'file', rel: att.rel });
+        if (o.alsoChildNotes) children.push(writeNoteFile(dir, base, att.markdown + '\n', relOf(dir), relId));
+      }
+    } catch (err) {
+      log.warn('attach failed for ' + src + ': ', err);
+      skipped.push({ path: src, why: 'attach failed' });
+    }
+  }
+
+  if (appended) {
+    const current = fs.readFileSync(file, 'utf8');
+    writeFileAtomic(file, current.replace(/\s*$/, '') + appended, 'utf8');
+  }
+  log.info('attached ' + attached.length + ' file(s) to ' + relId);
+  return { ok: true, attached, children, skipped };
+});
+
+/**
+ * The Breakdown tab: ingest a file and explode it into its important parts as
+ * linked child notes under a single document node.
+ */
+handle('breakdown-file', (_e, paths, folderId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const folder = folderId == null ? 'Breakdown' : folderId;
+  const dir = folder ? inVault(folder) : path.resolve(settings.vaultPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const docs = [];
+  const skipped = [];
+  touched();
+
+  for (const src of (paths || [])) {
+    let stat;
+    try { stat = fs.statSync(src); } catch { skipped.push({ path: src, why: 'unreadable' }); continue; }
+    if (stat.isDirectory()) { skipped.push({ path: src, why: 'folders cannot be broken down' }); continue; }
+
+    const ext = path.extname(src).toLowerCase();
+    const base = path.basename(src, ext);
+
+    if (!TEXTUAL.has(ext)) {
+      // binary: we can still file it, we just cannot read inside it
+      try {
+        const att = copyToAttachments(src);
+        const parent = writeNoteFile(dir, base, att.markdown + '\n', folder, null);
+        docs.push({ doc: parent, parts: [], note: 'binary file — attached whole' });
+      } catch (err) {
+        log.warn('breakdown attach failed for ' + src + ': ', err);
+        skipped.push({ path: src, why: 'could not attach' });
+      }
+      continue;
+    }
+
+    try {
+      const raw = fs.readFileSync(src, 'utf8');
+      const parts = classifier.breakdown(raw, { limit: 40 });
+      const summary = ['Broken down from `' + path.basename(src) + '`',
+        '', parts.length + ' part' + (parts.length === 1 ? '' : 's') + ' extracted.'].join('\n');
+      const parent = writeNoteFile(dir, base, summary, folder, null);
+      const made = [];
+      for (const p of parts) {
+        const body = p.kind === 'point' || p.kind === 'action' || p.kind === 'highlight'
+          ? p.body + '\n\n#' + p.kind
+          : p.body;
+        made.push(writeNoteFile(dir, p.title, body, folder, parent.id));
+      }
+      docs.push({ doc: parent, parts: made });
+      log.info('broke down ' + path.basename(src) + ' into ' + made.length + ' part(s)');
+    } catch (err) {
+      log.warn('breakdown failed for ' + src + ': ', err);
+      skipped.push({ path: src, why: 'could not read' });
+    }
+  }
+  return { ok: true, docs, skipped, folder: folder || '' };
+});
+
+// Pick arbitrary files (the import dialog is deliberately narrow; this is not).
+handle('pick-files', async (_e, title) => {
+  const r = await dialog.showOpenDialog({
+    title: title || 'Choose files',
+    properties: ['openFile', 'multiSelections']
+  });
+  return (r.canceled ? [] : r.filePaths);
+});
 
 // Paste an image straight out of the clipboard into the vault.
 handle('import-image-buffer', (_e, bytes, name, folderId) => {

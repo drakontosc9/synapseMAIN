@@ -6,7 +6,7 @@ const ok = (name, got, want) => {
   catch { console.log('  ✗ ' + name + '  got=' + JSON.stringify(got) + ' want=' + JSON.stringify(want)); fail++; }
 };
 
-const { splitMarkdown, parseNote } = require('../classifier');
+const { splitMarkdown, parseNote, breakdown } = require('../classifier');
 const NL = '\n';
 
 console.log('splitMarkdown — heading mode:');
@@ -58,6 +58,72 @@ console.log('\nsplitMarkdown — edge cases:');
   ok('heading section keeps its blank lines', m[0].body.indexOf('b') >= 0, true);
 
   ok('minChars filters tiny fragments', splitMarkdown(['aaaa', '', 'b'].join(NL), { minChars: 2 }).length, 1);
+}
+
+console.log('\nbreakdown — structured documents:');
+{
+  const doc = ['# Plan', 'intro', '', '## Phase one', 'do the thing', '', '## Phase two', 'do more'].join(NL);
+  const parts = breakdown(doc);
+  ok('uses headings when present', parts.length, 3);
+  ok('marks them as sections', parts[0].kind, 'section');
+  ok('keeps heading titles', parts.map(p => p.title), ['Plan', 'Phase one', 'Phase two']);
+}
+
+console.log('\nbreakdown — list mining:');
+{
+  const doc = [
+    'Meeting notes from Tuesday.',
+    '- ship the installer',
+    '* write the changelog',
+    '1. tell the users',
+    'Some trailing prose that is not a list item at all.'
+  ].join(NL);
+  const parts = breakdown(doc);
+  const bodies = parts.map(p => p.body);
+  ok('dash bullets extracted', bodies.indexOf('ship the installer') >= 0, true);
+  ok('star bullets extracted', bodies.indexOf('write the changelog') >= 0, true);
+  ok('numbered items extracted', bodies.indexOf('tell the users') >= 0, true);
+  ok('list items marked as points', parts.find(p => p.body === 'ship the installer').kind, 'point');
+}
+
+console.log('\nbreakdown — action cues:');
+{
+  const doc = [
+    'General background chatter that says nothing much.',
+    'TODO: renew the certificate',
+    'We decided to postpone the launch until March.',
+    'The deadline is the 14th.'
+  ].join(NL);
+  const parts = breakdown(doc);
+  const kinds = parts.map(p => p.kind);
+  ok('cue lines are picked up', parts.length >= 3, true);
+  ok('and marked as actions', kinds.indexOf('action') >= 0, true);
+  ok('todo line captured', parts.some(p => p.body.indexOf('renew the certificate') >= 0), true);
+  ok('decision line captured', parts.some(p => p.body.indexOf('postpone the launch') >= 0), true);
+}
+
+console.log('\nbreakdown — prose fallback:');
+{
+  const doc = 'The migration replaced the legacy scheduler with a queue-backed worker pool. ' +
+    'Throughput improved substantially under sustained load during the trial period. ' +
+    'Short one.';
+  const parts = breakdown(doc);
+  ok('falls back to dense sentences', parts.length >= 1, true);
+  ok('marked as highlights', parts[0].kind, 'highlight');
+  ok('drops the very short sentence', parts.every(p => p.body.length >= 30), true);
+}
+
+console.log('\nbreakdown — edge cases:');
+{
+  ok('empty input yields nothing', breakdown(''), []);
+  ok('whitespace yields nothing', breakdown('   ' + NL + '  '), []);
+  ok('respects the limit', breakdown(
+    Array.from({ length: 60 }, (_, i) => '- item number ' + i).join(NL), { limit: 5 }).length, 5);
+  const dupes = breakdown(['- same thing', '- same thing', '- other thing'].join(NL));
+  ok('deduplicates identical points', dupes.length, 2);
+  // frontmatter must not leak into the parts
+  const fm = ['---', 'title: "Doc"', '---', '- real point'].join(NL);
+  ok('frontmatter ignored', breakdown(fm).length, 1);
 }
 
 console.log('\nparseNote reads the burner field:');

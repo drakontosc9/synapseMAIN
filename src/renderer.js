@@ -7,6 +7,46 @@ let settings = { groupCreate: 'both' };
 let config = {};
 let appInfo = {};
 let lastScan = null;
+let panes = { a: null, b: null };
+let activePane = 'a';
+let tabs = [];
+let activeTabId = null, splitTabId = null;
+
+// Every pane gets the same handlers, but each knows which pane it belongs to so
+// clicking into a pane makes it the focused one.
+function makeHandlers(pane) {
+  const focus = () => { if (activePane !== pane) focusPane(pane); };
+  return {
+    onNodeClick: (node) => { focus(); openNote(node); },
+    onBackgroundClick: () => { focus(); closePanel(); hideCtx(); hideSearch(); },
+    onPickup: () => { focus(); showHint('Carrying a note — drop it on another to make it a <b>child</b>. Release on empty space to cancel.'); },
+    onMakeChild: (a, b) => { focus(); makeChild(a, b); },
+    onMakeLink: (a, b) => { focus(); makeLink(a, b); },
+    onDropInFolder: (a, b) => { focus(); dropInFolder(a, b); },
+    onDropOutside: (id, x, y) => { focus(); return onDropOutside(id, x, y); },
+    onDragOutside: onDragOverTabs,
+    onSelectionChange: (ids) => { focus(); updateSelbar(ids); },
+    onContextMenu: (info) => { focus(); showCtx(info); },
+    onBreadcrumb: (path) => { if (pane === activePane) renderBreadcrumb(path); },
+    onFocusGraph: (node) => { focus(); onFocusGraph(node); },
+    onHover: showHoverCard,
+    onHoverEnd: hideHoverCard
+  };
+}
+
+// The graph config derived from the current theme + settings, shared by panes.
+function graphConfig() {
+  const th = THEMES[config.theme] || THEMES.midnight;
+  return {
+    background: config.background, gridColor: th.grid, gridSpacing: config.gridSpacing,
+    nodeScale: config.nodeScale, labelScale: config.labelScale, folderBase: config.folderBase, folderGrow: config.folderGrow,
+    threshold: config.threshold, ramp: config.ramp, repulsion: config.repulsion, spring: config.spring,
+    linkTension: config.linkTension, packing: config.packing, animSpeed: config.animSpeed, inertia: config.inertia,
+    longPressMs: config.longPressMs, ripples: config.ripples, showMinimap: config.showMinimap,
+    showSuggestions: config.showSuggestions, reveal: config.reveal || 'fade',
+    edgeStyle: config.edgeStyle || 'curved', folderColors: config.folderColors || {}
+  };
+}
 let searchExact = false;
 let undoStack = [];
 let audioCtx = null;
@@ -27,18 +67,13 @@ const THEMES = {
   try { settings = await api.getSettings() || settings; } catch {}
   try { config = await api.getConfig() || {}; } catch {}
 
-  graph = new SynapseGraph(el('graph'), {
-    onNodeClick: openNote,
-    onBackgroundClick: () => { closePanel(); hideCtx(); hideSearch(); },
-    onPickup: () => showHint('Carrying a note — drop it on another to make it a <b>child</b>. Release on empty space to cancel.'),
-    onMakeChild: makeChild, onMakeLink: makeLink, onDropInFolder: dropInFolder,
-    onSelectionChange: updateSelbar, onContextMenu: showCtx,
-    onBreadcrumb: renderBreadcrumb, onFocusGraph: onFocusGraph,
-    onHover: showHoverCard, onHoverEnd: hideHoverCard
-  });
+  panes.a = new SynapseGraph(el('graph'), makeHandlers('a'));
+  panes.b = new SynapseGraph(el('graph2'), makeHandlers('b'));
+  graph = panes.a;
 
   wireCapture(); wireWorkspace(); wireSettings(); wirePalette(); wireAsk();
-  wireSpawn(); wireLens(); wireDropAndPaste();
+  wireSpawn(); wireLens(); wireDropAndPaste(); wireTabs();
+  loadTabs();
   applyConfig(config);
   applySettingsToUI();
   if (api.onUpdateStatus) api.onUpdateStatus(d => {
@@ -55,6 +90,8 @@ const THEMES = {
   renderAbout();
 
   await refresh();
+  renderTabs();
+  if (splitTabId) applyTab(tabById(splitTabId), 'b');
 
   // Smart startup: if the vault already has thoughts in it, the splash screen is
   // just a door you have to open every launch. Go straight to the workspace.
@@ -63,6 +100,310 @@ const THEMES = {
     if (v && v.hasNotes) showWorkspace(true);
   } catch {}
 })();
+
+// ============================================================================
+// WORKSPACE TABS / MULTI-GRAPH ENGINE
+// ----------------------------------------------------------------------------
+// A tab is a *view* over the one vault: a scope (a folder subtree, or the whole
+// vault for the pinned Master tab) plus its own camera and lens. Only the panes
+// on screen own a SynapseGraph instance, so background tabs cost nothing —
+// they are literally not rendering.
+// ============================================================================
+
+const MASTER_TAB = { id: 'master', title: 'Master', scopeId: '', pinned: true, kind: 'scope' };
+// The Breakdown tab is a drop target with an opinion: anything you drop while
+// it is active gets torn into its important parts as linked child notes.
+const INGEST_TAB = { id: 'ingest', title: 'Breakdown', scopeId: 'Breakdown', pinned: true, kind: 'ingest' };
+
+function defaultTabs() { return [Object.assign({}, MASTER_TAB), Object.assign({}, INGEST_TAB)]; }
+
+function tabById(id) { return tabs.find(t => t.id === id) || null; }
+function activeTab() { return tabById(activeTabId) || tabs[0]; }
+function paneOf(tabId) {
+  if (tabId === activeTabId) return 'a';
+  if (tabId === splitTabId) return 'b';
+  return null;
+}
+function graphOf(pane) { return pane === 'b' ? panes.b : panes.a; }
+
+// Restrict a full scan to one folder subtree. Everything outside the scope is
+// dropped, and the scope folder is re-parented onto the synthetic vault root so
+// the semantic-zoom maths still works unchanged.
+function scopeData(data, scopeId) {
+  if (!data) return { nodes: [], links: [], folders: [], suggestions: [] };
+  if (!scopeId) return data;
+
+  const inScope = new Set();
+  const byId = new Map(data.nodes.map(n => [n.id, n]));
+  if (!byId.has(scopeId)) return { nodes: [], links: [], folders: [], suggestions: [], missing: true };
+
+  for (const n of data.nodes) {
+    if (n.type === 'root') continue;
+    let cur = n, hops = 0;
+    while (cur && hops++ < 40) {
+      if (cur.id === scopeId) { inScope.add(n.id); break; }
+      cur = cur.containerId ? byId.get(cur.containerId) : null;
+    }
+  }
+
+  const nodes = data.nodes
+    .filter(n => n.type === 'root' || inScope.has(n.id))
+    .map(n => (n.id === scopeId ? Object.assign({}, n, { containerId: '__root__' }) : n));
+
+  const noteCount = nodes.filter(n => n.type === 'note').length;
+  const links = data.links.filter(l => inScope.has(l.source) && inScope.has(l.target));
+  const suggestions = (data.suggestions || []).filter(s => inScope.has(s.a) && inScope.has(s.b));
+  const folders = [...new Set(nodes.filter(n => n.type === 'note').map(n => n.folder))].sort();
+
+  return {
+    nodes: nodes.map(n => n.type === 'root' ? Object.assign({}, n, { noteCount }) : n),
+    links, folders, suggestions, busyTags: data.busyTags || []
+  };
+}
+
+// Push a tab's scoped data + camera into a pane's graph instance.
+function applyTab(tab, pane) {
+  const g = graphOf(pane);
+  if (!g || !tab) return;
+  const scoped = scopeData(lastScan, tab.scopeId);
+  g.setData(scoped);
+  g.setConfig(graphConfig());
+  g.setLens(tab.lens && tab.lens !== 'free' ? tab.lens : null);
+  if (tab.cam && Number.isFinite(tab.cam.k)) {
+    g.transform.x = tab.cam.x; g.transform.y = tab.cam.y; g.transform.k = tab.cam.k;
+    g.reheat(.5);
+  } else {
+    setTimeout(() => g.fit(), 60);
+  }
+  const badge = el(pane === 'b' ? 'badgeB' : 'badgeA');
+  if (badge) badge.textContent = tab.title;
+}
+
+function rememberCam(tabId) {
+  const pane = paneOf(tabId), tab = tabById(tabId);
+  const g = pane && graphOf(pane);
+  if (!g || !tab) return;
+  tab.cam = { x: g.transform.x, y: g.transform.y, k: g.transform.k };
+  tab.lens = g.lens || 'free';
+}
+
+function renderTabs() {
+  const row = el('tabs');
+  row.innerHTML = '';
+  for (const t of tabs) {
+    const b = document.createElement('button');
+    b.className = 'wtab' + (t.id === activeTabId ? ' active' : '') + (t.id === splitTabId ? ' split' : '');
+    b.dataset.tab = t.id;
+    b.title = t.scopeId ? 'Scoped to ' + t.scopeId : 'The whole vault';
+
+    if (t.kind === 'ingest') b.classList.add('ingest');
+
+    const dot = document.createElement('span');
+    dot.className = 'wtab-dot';
+    dot.style.background = t.kind === 'ingest' ? '#f0a35e'
+      : t.scopeId ? graphOf('a').colorFor(t.scopeId.split('/').pop()) : 'var(--accent)';
+    b.appendChild(dot);
+
+    const label = document.createElement('span');
+    label.className = 'wtab-title'; label.textContent = t.title;
+    b.appendChild(label);
+
+    if (t.kind === 'ingest') {
+      b.title = 'Drop a file here (or while this tab is open) to break it into its important parts';
+      const i = document.createElement('span');
+      i.className = 'wtab-pin'; i.textContent = '⇩';
+      b.appendChild(i);
+    } else if (t.pinned) {
+      const p = document.createElement('span');
+      p.className = 'wtab-pin'; p.textContent = '📌'; p.title = 'Always available';
+      b.appendChild(p);
+    } else {
+      const x = document.createElement('span');
+      x.className = 'wtab-close'; x.textContent = '✕';
+      x.addEventListener('click', ev => { ev.stopPropagation(); closeTab(t.id); });
+      b.appendChild(x);
+    }
+
+    b.addEventListener('click', () => activateTab(t.id));
+    b.addEventListener('auxclick', ev => { if (ev.button === 1 && !t.pinned) { ev.preventDefault(); closeTab(t.id); } });
+    row.appendChild(b);
+  }
+  el('splitTab').classList.toggle('active', !!splitTabId);
+  el('paneB').classList.toggle('hidden', !splitTabId);
+  document.querySelector('.panes').classList.toggle('split', !!splitTabId);
+  el('paneA').classList.toggle('focused', activePane === 'a');
+  el('paneB').classList.toggle('focused', activePane === 'b');
+}
+
+function activateTab(id, pane) {
+  const t = tabById(id); if (!t) return;
+  const target = pane || 'a';
+  if (target === 'a') {
+    if (id === splitTabId) { splitTabId = activeTabId; rememberCam(activeTabId); }  // swap panes
+    else rememberCam(activeTabId);
+    activeTabId = id;
+    applyTab(t, 'a');
+    if (splitTabId) applyTab(tabById(splitTabId), 'b');
+    focusPane('a');
+  } else {
+    rememberCam(splitTabId);
+    splitTabId = id;
+    applyTab(t, 'b');
+    focusPane('b');
+  }
+  renderTabs();
+  saveTabs();
+}
+
+function focusPane(pane) {
+  activePane = pane;
+  graph = graphOf(pane);
+  el('paneA').classList.toggle('focused', pane === 'a');
+  el('paneB').classList.toggle('focused', pane === 'b');
+}
+
+function openTabForNode(node, opts) {
+  if (!node) return null;
+  const scopeId = node.type === 'folder' ? node.id : node.containerId;
+  if (!scopeId) { toast('That lives at the top level — the Master tab already shows it.'); return null; }
+  const existing = tabs.find(t => t.scopeId === scopeId);
+  if (existing) { activateTab(existing.id, opts && opts.pane); return existing; }
+  const tab = {
+    id: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    title: scopeId.split('/').pop(),
+    scopeId,
+    lens: 'free'
+  };
+  tabs.push(tab);
+  activateTab(tab.id, opts && opts.pane);
+  toast('Opened <b>' + short(tab.title) + '</b> in its own tab');
+  return tab;
+}
+
+function closeTab(id) {
+  const t = tabById(id);
+  if (!t || t.pinned) return;
+  tabs = tabs.filter(x => x.id !== id);
+  if (splitTabId === id) splitTabId = null;
+  if (activeTabId === id) activeTabId = (splitTabId && splitTabId !== id) ? splitTabId : tabs[0].id;
+  if (splitTabId === activeTabId) splitTabId = null;
+  applyTab(activeTab(), 'a');
+  if (splitTabId) applyTab(tabById(splitTabId), 'b'); else focusPane('a');
+  renderTabs();
+  saveTabs();
+}
+
+function toggleSplit() {
+  if (splitTabId) {
+    rememberCam(splitTabId);
+    splitTabId = null;
+    focusPane('a');
+    renderTabs(); saveTabs();
+    setTimeout(() => panes.a.fit(), 80);
+    return;
+  }
+  const other = tabs.find(t => t.id !== activeTabId);
+  if (!other) { toast('Open another tab first — split compares two maps.'); return; }
+  splitTabId = other.id;
+  applyTab(other, 'b');
+  renderTabs(); saveTabs();
+  setTimeout(() => { panes.a.fit(); panes.b.fit(); }, 90);
+  toast('Split view — <b>' + short(activeTab().title) + '</b> vs <b>' + short(other.title) + '</b>');
+}
+
+// Cross-tab routing: dropping a node on a tab header files it into that tab's
+// folder, moving the idea between maps in one gesture.
+function tabAtPoint(clientX, clientY) {
+  const bar = el('tabbar');
+  const r = bar.getBoundingClientRect();
+  if (clientY < r.top || clientY > r.bottom) return undefined;   // not over the bar at all
+  for (const b of bar.querySelectorAll('.wtab')) {
+    const br = b.getBoundingClientRect();
+    if (clientX >= br.left && clientX <= br.right) return tabById(b.dataset.tab);
+  }
+  return null;   // over the bar, but not on a tab => spawn a new one
+}
+
+// Must answer the graph synchronously — it needs to know *right now* whether the
+// drop was consumed. Any actual work happens after.
+function onDropOutside(nodeId, clientX, clientY) {
+  const hit = tabAtPoint(clientX, clientY);
+  if (hit === undefined) return false;            // not over the tab bar: not ours
+  clearTabDropHint();
+  routeDroppedNode(nodeId, hit);
+  return true;
+}
+
+async function routeDroppedNode(nodeId, hit) {
+  const node = graph.map.get(nodeId);
+  if (!node) return;
+
+  if (hit === null) { openTabForNode(node); return; }   // empty tab-bar space
+  if (node.type !== 'note') { toast('Only notes can be routed between tabs.'); return; }
+  if (hit.scopeId === (node.containerId || '')) { toast('Already in <b>' + short(hit.title) + '</b>'); return; }
+
+  const from = parentDirOf(nodeId);
+  const res = await api.moveNote(nodeId, hit.scopeId);
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not route that note.'); return; }
+  pushUndo('routing of ' + short(node.title), async () => { await api.moveNote(res.to, from); await refresh(); });
+  await refresh();
+  toast('<b>' + short(node.title) + '</b> routed to <b>' + short(hit.title) + '</b>');
+}
+
+function onDragOverTabs(clientX, clientY) {
+  const hit = tabAtPoint(clientX, clientY);
+  clearTabDropHint();
+  if (hit === undefined) return;
+  el('tabbar').classList.add('dropping');
+  if (hit) {
+    const b = el('tabs').querySelector('[data-tab="' + hit.id + '"]');
+    if (b) b.classList.add('drop');
+  }
+}
+function clearTabDropHint() {
+  el('tabbar').classList.remove('dropping');
+  el('tabs').querySelectorAll('.wtab.drop').forEach(b => b.classList.remove('drop'));
+}
+
+function wireTabs() {
+  el('newTab').addEventListener('click', () => {
+    const node = graph.map.get(graph.opened) || null;
+    if (node) { openTabForNode(node); return; }
+    toast('Open a note or folder first, or drag a bubble onto the tab bar.');
+  });
+  el('splitTab').addEventListener('click', toggleSplit);
+}
+
+// Tabs live in the vault config, so a vault carries its own workspaces.
+function saveTabs() {
+  const slim = tabs.map(t => ({
+    id: t.id, title: t.title, scopeId: t.scopeId,
+    pinned: !!t.pinned, kind: t.kind || 'scope', lens: t.lens || 'free'
+  }));
+  updateConfig({ tabs: slim, activeTabId, splitTabId });
+}
+function loadTabs() {
+  const stored = Array.isArray(config.tabs) ? config.tabs : null;
+  tabs = (stored && stored.length) ? stored.slice() : defaultTabs();
+  if (!tabs.some(t => t.id === MASTER_TAB.id)) tabs.unshift(Object.assign({}, MASTER_TAB));
+  if (!tabs.some(t => t.kind === 'ingest')) tabs.push(Object.assign({}, INGEST_TAB));
+  activeTabId = tabById(config.activeTabId) ? config.activeTabId : tabs[0].id;
+  splitTabId = tabById(config.splitTabId) && config.splitTabId !== activeTabId ? config.splitTabId : null;
+}
+
+// A tab whose folder was renamed or deleted elsewhere must not linger as a
+// dead view.
+function pruneTabs() {
+  if (!lastScan) return;
+  const ids = new Set(lastScan.nodes.map(n => n.id));
+  const before = tabs.length;
+  tabs = tabs.filter(t => t.pinned || ids.has(t.scopeId));
+  if (tabs.length === before) return;
+  if (!tabById(activeTabId)) activeTabId = tabs[0].id;
+  if (!tabById(splitTabId)) splitTabId = null;
+  renderTabs(); saveTabs();
+  toast('Closed ' + (before - tabs.length) + ' tab(s) whose folder is gone');
+}
 
 // ---------- main-process events ----------
 function handleMenuAction(action) {
@@ -80,6 +421,22 @@ function handleMenuAction(action) {
     case 'recents':       toggleRecents(); break;
     case 'cycle-theme':   cycleTheme(); break;
     case 'open-help':     openSettings(); selectSettingsTab('help'); break;
+    case 'new-tab': {
+      const node = graph.map.get(graph.opened);
+      if (node) openTabForNode(node); else toast('Open a note or folder first, or drag a bubble onto the tab bar.');
+      break;
+    }
+    case 'close-tab': {
+      const t = activeTab();
+      if (t && !t.pinned) closeTab(t.id); else toast('The Master tab stays put.');
+      break;
+    }
+    case 'split': toggleSplit(); break;
+    case 'cycle-lens': {
+      const order = ['free', 'mind', 'skills', 'knowledge'];
+      setLens(order[(order.indexOf(graph.lens || 'free') + 1) % order.length]);
+      break;
+    }
   }
 }
 
@@ -113,15 +470,9 @@ function applyConfig(cfg) {
   for (const k of Object.keys(th)) if (k.startsWith('--')) root.setProperty(k, th[k]);
   root.setProperty('--accent', config.accent || '#7c9cff');
   root.setProperty('--accent-soft', hexA(config.accent || '#7c9cff', th.dark ? .22 : .14));
-  if (graph) graph.setConfig({
-    background: config.background, gridColor: th.grid, gridSpacing: config.gridSpacing,
-    nodeScale: config.nodeScale, labelScale: config.labelScale, folderBase: config.folderBase, folderGrow: config.folderGrow,
-    threshold: config.threshold, ramp: config.ramp, repulsion: config.repulsion, spring: config.spring,
-    linkTension: config.linkTension, packing: config.packing, animSpeed: config.animSpeed, inertia: config.inertia,
-    longPressMs: config.longPressMs, ripples: config.ripples, showMinimap: config.showMinimap,
-    showSuggestions: config.showSuggestions, reveal: config.reveal || 'fade',
-    edgeStyle: config.edgeStyle || 'curved', folderColors: config.folderColors || {}
-  });
+  const gc = graphConfig();
+  if (panes.a) panes.a.setConfig(gc);
+  if (panes.b) panes.b.setConfig(gc);
   syncControls();
 }
 async function updateConfig(patch) { config = await api.setConfig(patch); applyConfig(config); }
@@ -138,23 +489,66 @@ function wireCapture() {
   box.addEventListener('input', grow);
   let pv = null;
   box.addEventListener('input', () => { clearTimeout(pv); pv = setTimeout(async () => { const text = box.value.trim(); if (!text) { el('destination').textContent = ''; return; } const p = await api.previewThought(text); el('destination').textContent = p ? '→ ' + p.folder : ''; }, 180); });
-  box.addEventListener('keydown', async e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault(); const text = box.value.trim(); if (!text) return;
-      if (!vaultPath) { vaultPath = await api.chooseVault(); if (!vaultPath) return; el('noVault').classList.add('hidden'); setVaultName(); }
-      let res;
-      try { res = await api.captureThought(text); }
-      catch (err) { toast((err && err.message) || 'Could not save that thought.'); return; }
-      box.value = ''; box.style.height = 'auto'; el('destination').textContent = '';
-      await refresh(); showWorkspace(true, true); graph.reheat(1);
-      setTimeout(() => { graph.focusNote(res.id); if (config.ripples) graph.rippleNote(res.id); if (config.sound) playTick(); }, 480);
-      // filing is a guess, so always offer the correction inline rather than
-      // making the user hunt the note down in the graph
-      toastAction('Filed in <b>' + escapeHtml(res.folder) + '</b>', 'Wrong folder?', () => refileCapture(res, text));
-    }
-  });
+  box.addEventListener('keydown', onCaptureKey);
   el('chooseVault').addEventListener('click', pickVault);
   el('toGraph').addEventListener('click', () => showWorkspace(true));
+}
+
+// Enter on the capture screen must always file the thought — never quietly
+// insert a newline. Two ways it used to fall through:
+//   * mid-IME `keydown` reports key 'Process' / keyCode 229, not 'Enter', so the
+//     branch was skipped and the browser inserted the newline itself;
+//   * a second Enter pressed during the await (vault picker, capture, rescan)
+//     re-entered the handler in a half-updated state.
+// Now: bare Enter is always swallowed, composition is respected, and captures
+// cannot overlap.
+let capturing = false;
+
+function isEnterKey(e) {
+  return e.key === 'Enter' || e.keyCode === 13 || e.which === 13;
+}
+function isComposing(e) {
+  return !!e.isComposing || e.keyCode === 229;
+}
+
+async function onCaptureKey(e) {
+  if (!isEnterKey(e) || e.shiftKey) return;   // Shift+Enter keeps its newline
+  if (isComposing(e)) return;                 // let the IME commit its candidate
+
+  e.preventDefault();                          // no stray newline, whatever follows
+  if (e.repeat || capturing) return;
+
+  const box = el('thought');
+  const text = box.value.trim();
+  if (!text) return;
+
+  capturing = true;
+  try {
+    if (!vaultPath) {
+      vaultPath = await api.chooseVault();
+      if (!vaultPath) return;
+      el('noVault').classList.add('hidden');
+      setVaultName();
+    }
+    let res;
+    try { res = await api.captureThought(text); }
+    catch (err) { toast((err && err.message) || 'Could not save that thought.'); return; }
+
+    box.value = ''; box.style.height = 'auto'; el('destination').textContent = '';
+    await refresh();
+    showWorkspace(true, true);
+    graph.reheat(1);
+    setTimeout(() => {
+      graph.focusNote(res.id);
+      if (config.ripples) graph.rippleNote(res.id);
+      if (config.sound) playTick();
+    }, 480);
+    // filing is a guess, so always offer the correction inline rather than
+    // making the user hunt the note down in the graph
+    toastAction('Filed in <b>' + escapeHtml(res.folder) + '</b>', 'Wrong folder?', () => refileCapture(res, text));
+  } finally {
+    capturing = false;
+  }
 }
 
 // ---------- workspace ----------
@@ -237,6 +631,29 @@ function onGlobalKey(e) {
     return;
   }
   if (mod && key === 'a' && !inTextField(e)) { e.preventDefault(); graph.selectAllVisible(); return; }
+
+  // tabs
+  if (mod && key === 't' && !e.shiftKey) {
+    e.preventDefault();
+    const node = graph.map.get(graph.opened);
+    if (node) openTabForNode(node); else toast('Open a note or folder first, or drag a bubble onto the tab bar.');
+    return;
+  }
+  if (mod && key === 'w' && !inTextField(e)) {
+    e.preventDefault();
+    const t = activeTab();
+    if (t && !t.pinned) closeTab(t.id); else toast('The Master tab stays put.');
+    return;
+  }
+  if (mod && e.key === 'Tab') {
+    e.preventDefault();
+    if (tabs.length < 2) return;
+    const i = tabs.findIndex(t => t.id === activeTabId);
+    const next = tabs[(i + (e.shiftKey ? -1 + tabs.length : 1)) % tabs.length];
+    activateTab(next.id);
+    return;
+  }
+  if (mod && (e.key === '\\' || key === '\\')) { e.preventDefault(); toggleSplit(); return; }
   if (mod && key === 'l' && !inTextField(e)) {
     e.preventDefault();
     const order = ['free', 'mind', 'skills', 'knowledge'];
@@ -295,7 +712,21 @@ function renderAbout() {
 }
 
 // ---------- data ----------
-async function refresh() { const data = await api.scanVault(); lastScan = data; graph.setData(data); buildLegend(); }
+// One scan feeds every visible pane; each pane sees it through its tab's scope.
+async function refresh() {
+  lastScan = await api.scanVault();
+  const a = activeTab();
+  if (a) {
+    const scopedA = scopeData(lastScan, a.scopeId);
+    panes.a.setData(scopedA);
+  }
+  if (splitTabId) {
+    const b = tabById(splitTabId);
+    if (b) panes.b.setData(scopeData(lastScan, b.scopeId));
+  }
+  pruneTabs();
+  buildLegend();
+}
 function buildLegend() {
   const legend = el('legend'); legend.innerHTML = '';
   const et = new Set(['wikilink', 'tag', 'parent']);
@@ -538,6 +969,11 @@ function showCtx({ x, y, node }) {
     add('Delete note…', () => doDeleteNote(node));
   } else if (node && node.type === 'folder') {
     add('Zoom into folder', () => graph._zoomToNode(node));
+    add('Open in a new tab', () => openTabForNode(node));
+    if (splitTabId || tabs.length > 1) add('Open in the other pane', () => {
+      const t = openTabForNode(node, { pane: 'b' });
+      if (t) { splitTabId = t.id; renderTabs(); saveTabs(); }
+    });
     add('Open in file explorer', () => openFolderInExplorer(node.id));
     sep();
     add('New thought inside', () => openSpawn(x, y));
@@ -979,13 +1415,26 @@ function wireDropAndPaste() {
   window.addEventListener('dragenter', e => { if (hasFiles(e)) { e.preventDefault(); show(); } });
   window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
   window.addEventListener('dragleave', e => { if (hasFiles(e)) hide(); });
+  // While dragging over the canvas, light up whatever the files would land on.
+  window.addEventListener('dragover', e => {
+    if (!hasFiles(e)) return;
+    const t = dropTargetAt(e.clientX, e.clientY);
+    zone.querySelector('.dropzone-inner').textContent =
+      t.kind === 'note' ? 'Attach to "' + short(t.node.title) + '"'
+      : t.kind === 'tab' ? (t.tab.kind === 'ingest' ? 'Break down into ' + t.tab.title : 'Import into ' + t.tab.title)
+      : t.kind === 'folder' ? 'Import into ' + t.node.title
+      : (activeTab() && activeTab().kind === 'ingest') ? 'Break down into ' + activeTab().title
+      : 'Drop files to import';
+  });
+
   window.addEventListener('drop', async e => {
     if (!hasFiles(e)) return;
     e.preventDefault();
     depth = 0; zone.classList.add('hidden');
+    clearTabDropHint();
     const paths = api.pathsForFiles(e.dataTransfer.files);
     if (!paths.length) { toast('Could not read those files.'); return; }
-    await importDropped(paths, e.clientX, e.clientY);
+    await routeDroppedFiles(paths, e.clientX, e.clientY);
   });
 
   window.addEventListener('paste', async e => {
@@ -1011,10 +1460,79 @@ function hasFiles(e) {
   return !!dt && Array.from(dt.types || []).indexOf('Files') !== -1;
 }
 
-async function importDropped(paths, screenX, screenY) {
+// Work out what a file drop at this screen point should hit: a note (attach),
+// a folder bubble (import there), a tab chip (import/break down into that tab),
+// or nothing in particular.
+function dropTargetAt(clientX, clientY) {
+  const tabHit = tabAtPoint(clientX, clientY);
+  if (tabHit !== undefined) return tabHit ? { kind: 'tab', tab: tabHit } : { kind: 'tabbar' };
+
+  if (el('workspace').classList.contains('hidden')) return { kind: 'none' };
+  const canvas = graph && graph.canvas;
+  if (!canvas) return { kind: 'none' };
+  const r = canvas.getBoundingClientRect();
+  if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return { kind: 'none' };
+
+  const px = clientX - r.left, py = clientY - r.top;
+  const node = graph._nodeAt(px, py);
+  if (node && node.type === 'note') return { kind: 'note', node };
+  if (node && node.type === 'folder') return { kind: 'folder', node };
+  const world = graph.worldAt(px, py);
+  const folder = graph.folderAtWorld(world.x, world.y);
+  return folder ? { kind: 'folder', node: folder } : { kind: 'none' };
+}
+
+async function routeDroppedFiles(paths, clientX, clientY) {
+  const target = dropTargetAt(clientX, clientY);
+
+  // dropped straight onto a note: attach the files to it
+  if (target.kind === 'note') { await routeAttach(target.node.id, paths, target.node.title); return; }
+
+  // dropped on a tab chip
+  if (target.kind === 'tab') {
+    if (target.tab.kind === 'ingest') { await breakdownInto(paths, target.tab); return; }
+    await importDropped(paths, null, null, target.tab.scopeId || 'Imported');
+    activateTab(target.tab.id);
+    return;
+  }
+
+  // the Breakdown tab is active: everything dropped gets taken apart
+  const act = activeTab();
+  if (act && act.kind === 'ingest') { await breakdownInto(paths, act); return; }
+
+  if (target.kind === 'folder') { await importDropped(paths, null, null, target.node.id); return; }
+  await importDropped(paths, clientX, clientY);
+}
+
+async function routeAttach(noteId, paths, title) {
+  const res = await api.attachToNote(noteId, paths, { alsoChildNotes: true });
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not attach those files.'); return; }
+  await refresh();
+  await openNote({ id: noteId });
+  const name = short(title || (graph.map.get(noteId) || {}).title || 'the note');
+  const kids = res.children.length ? ' · ' + res.children.length + ' child note(s)' : '';
+  const skipped = res.skipped.length ? ' · skipped ' + res.skipped.length : '';
+  toast('Attached ' + res.attached.length + ' file(s) to <b>' + name + '</b>' + kids + skipped);
+}
+
+async function breakdownInto(paths, tab) {
+  const res = await api.breakdownFile(paths, tab.scopeId || 'Breakdown');
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not break those files down.'); return; }
+  await refresh();
+  activateTab(tab.id);
+  const parts = res.docs.reduce((n, d) => n + d.parts.length, 0);
+  if (res.docs.length) {
+    const first = res.docs[0].doc;
+    setTimeout(() => { graph.focusNote(first.id); graph.flare(first.id); }, 250);
+  }
+  const skipped = res.skipped.length ? ' · skipped ' + res.skipped.length : '';
+  toast('Broke down ' + res.docs.length + ' file(s) into <b>' + parts + '</b> part(s)' + skipped);
+}
+
+async function importDropped(paths, screenX, screenY, forceFolder) {
   // drop inside a folder bubble => import into that folder
-  let folder = 'Imported';
-  if (typeof screenX === 'number' && !el('workspace').classList.contains('hidden')) {
+  let folder = forceFolder || 'Imported';
+  if (!forceFolder && typeof screenX === 'number' && !el('workspace').classList.contains('hidden')) {
     const rect = el('graph').getBoundingClientRect();
     const world = graph.worldAt(screenX - rect.left, screenY - rect.top);
     const fnode = graph.folderAtWorld(world.x, world.y);
@@ -1104,6 +1622,20 @@ function renderPalette() {
     { kind: 'action', label: 'Lens: My Skills (prerequisite tree)', run: () => { closePalette(); setLens('skills'); } },
     { kind: 'action', label: 'Lens: Knowledge (subject clusters)', run: () => { closePalette(); setLens('knowledge'); } },
     { kind: 'action', label: 'Import files…', run: async () => { closePalette(); onImport(); } },
+    { kind: 'action', label: 'Break down a file into its parts…', run: async () => {
+      closePalette();
+      const paths = await api.pickFiles('Choose a file to break down');
+      if (!paths.length) return;
+      const ingest = tabs.find(t => t.kind === 'ingest') || INGEST_TAB;
+      await breakdownInto(paths, ingest);
+    } },
+    { kind: 'action', label: 'Attach files to this note…', run: async () => {
+      closePalette();
+      if (!currentNote) { toast('Open a note first.'); return; }
+      const paths = await api.pickFiles('Choose files to attach');
+      if (!paths.length) return;
+      await routeAttach(currentNote.id, paths);
+    } },
     { kind: 'action', label: 'New group', run: () => { closePalette(); createGroup(''); } },
     { kind: 'action', label: 'Save a link', run: () => { closePalette(); onAddLink(); } },
     { kind: 'action', label: 'Move this note to another folder', run: () => { closePalette(); doMoveNote(); } },
