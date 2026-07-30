@@ -136,11 +136,46 @@ function parseNote(content) {
     created: fm.created || null,
     folder: fm.folder || null,
     parent: fm.parent || null,
+    expires: fm.expires || null,
     tags: Array.isArray(fm.tags) ? fm.tags : (fm.tags ? [fm.tags] : []),
     links: extractLinks(body),
     body
   };
 }
+
+/**
+ * Split a Markdown document into sections for the auto-split importer.
+ * Headings start new sections; otherwise blank lines separate them. Returns
+ * [{ title, body }] with the document's own title first if it had one.
+ */
+function splitMarkdown(content, opts) {
+  const o = opts || {};
+  const parsed = parseNote(content);
+  const lines = parsed.body.split(/\r?\n/);
+  const out = [];
+  let cur = null;
+  const flush = () => {
+    if (cur && cur.body.join('\n').trim()) {
+      out.push({ title: cur.title || deriveTitle(cur.body.join(' ')), body: cur.body.join('\n').trim() });
+    }
+    cur = null;
+  };
+
+  const hasHeading = lines.some(l => /^#{1,6}\s+\S/.test(l));
+  for (const line of lines) {
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (hasHeading && h) { flush(); cur = { title: h[2].trim(), body: [] }; continue; }
+    if (!hasHeading && !line.trim()) { flush(); continue; }
+    if (!cur) cur = { title: null, body: [] };
+    cur.body.push(line);
+  }
+  flush();
+
+  const min = o.minChars == null ? 1 : o.minChars;
+  return out.filter(s => s.body.length >= min);
+}
+
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 /**
  * Distinctive words from a thought, for learning filing rules when the user
@@ -164,9 +199,7 @@ function learnableTerms(text, limit) {
   return out;
 }
 
-function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-
 module.exports = {
   classify, extractTags, extractLinks, deriveTitle, slugify,
-  buildNote, parseNote, learnableTerms, STOPWORDS
+  buildNote, parseNote, learnableTerms, splitMarkdown, STOPWORDS
 };

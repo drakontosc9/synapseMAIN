@@ -139,6 +139,10 @@ function buildModel(root, entries, dirs) {
       tags: parsed.tags, links: parsed.links,
       parentNote: parsed.parent || null,
       created: parsed.created, path: file,
+      // burner notes carry a self-destruct time
+      expires: parsed.expires ? String(parsed.expires).replace(/^"|"$/g, '') : null,
+      // "mass": how much substance this note has, used for gravitational sizing
+      mass: parsed.body.trim().length,
       excerpt: parsed.body.replace(/\s+/g, ' ').trim().slice(0, 160),
       // full-text search blob: title + tags + body (so search reads CONTENT, not folders)
       search: (title + ' ' + parsed.tags.join(' ') + ' ' + parsed.body).toLowerCase()

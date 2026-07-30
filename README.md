@@ -56,6 +56,53 @@ BEFORE YOU RUN THIS AS WITH ANY CODE DOWNLOADED FROM THE EVIL INTERNET RUN IT TH
   as its own note in `Links/`.
 - **Live sync with your other editors** — Synapse watches the vault, so notes you change in
   Obsidian, VS Code or Explorer show up without pressing rescan.
+- **Open anything in Explorer** — right-click a folder bubble → *Open in file explorer*, a
+  note → *Open containing folder*, or the background → *Open vault in file explorer*.
+
+### Tactile graph
+
+- **Caveman drag-and-drop** — drag a note onto a **folder** to file it there instantly, or
+  onto another **note** to nest it beneath. The target rings up green (file) or amber
+  (nest) while you hover, so the gesture is legible before you let go.
+- **Gravitational mass** — nodes grow with body length and link count, and heavier nodes
+  shrug off repulsion, so dense concepts sit still while light ones drift into orbit.
+- **Colour inheritance** — nested nodes take shaded variants of their parent's hue.
+- **The flare effect** — double-click a note (or right-click → *Flare connections*) to send
+  a light pulse two hops out along its edges while everything else dims.
+- **Rubber-band select** — Ctrl+drag empty space to box-select many nodes; hold Shift to add
+  to the current selection. `Ctrl+A` grabs everything visible.
+- **In-graph creation** — double-click empty canvas (or `Ctrl+Shift+N`) to spawn a thought
+  where you clicked, without going back to the splash screen. Drop it inside a folder bubble
+  and it belongs to that folder — no classifier guess needed.
+
+### Lens engine
+
+`Ctrl+L` cycles, or use the bar at the top of the graph. Folder bubbles dissolve, every note
+becomes visible, and nodes float and snap into the new arrangement leaving ghost traces of
+where they were:
+
+| Lens | Layout |
+|------|--------|
+| **Free** | Folder bubbles and normal physics |
+| **My Mind** | Temporal — recently created thoughts pulled to the centre, stale ones to the rim |
+| **My Skills** | Prerequisite tree — depth from the `parent:` chain, laid out in tidy rows |
+| **Knowledge** | Dense encyclopedic clusters, one tight grid per subject |
+
+### Ingestion
+
+- **Drag and drop** files anywhere onto the window; drop inside a folder bubble to import there.
+- **Paste images** straight from the clipboard — they land in `attachments/` wrapped in a note.
+- **Auto-split Markdown** — importing a `.md` can break it into linked sub-notes, one per
+  heading (or per paragraph if it has none), each parented to the source document.
+- **Broad format support** — text/CSV/JSON become note content; PDF, DOC, XLS, images, media
+  and archives are copied into `attachments/` and embedded.
+
+### Ephemeral burner notes
+
+Give a note a time-to-live (right-click → *Make it a burner*, or tick **burner** when
+spawning one) and it deletes itself when the timer runs out. A dashed rim around the node
+drains as its life does, turning red near the end. Synapse sweeps for expired notes at launch
+and every 15 minutes.
 
 ### Keyboard
 
@@ -63,6 +110,9 @@ BEFORE YOU RUN THIS AS WITH ANY CODE DOWNLOADED FROM THE EVIL INTERNET RUN IT TH
 |-----|--------|
 | `Ctrl+Shift+Space` | Quick capture from anywhere (global, rebindable) |
 | `Ctrl+N` | New thought |
+| `Ctrl+Shift+N` | Spawn a thought inside the graph |
+| `Ctrl+L` | Cycle the layout lens |
+| `Ctrl+A` | Select every visible note |
 | `Ctrl+K` | Command palette |
 | `Ctrl+F` | Jump to search |
 | `Ctrl+E` | Recent notes |
@@ -151,7 +201,7 @@ npm run dist:win     # outputs dist/Synapse Setup <version>.exe  +  a portable z
 | `src/search.js` | Ranked note search (scored + exact modes) |
 | `src/renderer.js` | Wires the UI to the main process |
 | `rules.json` | Default sorting rules (copied into each new vault) |
-| `test/` | Node suites (`npm test`) + a real-renderer Electron smoke test (`npm run test:ui`) |
+| `test/` | Node suites (`npm test`), a real-renderer UI test (`npm run test:ui`), and a live main-process IPC test against a throwaway vault (`npm run test:ipc`) |
 
 ## Your data
 
@@ -167,10 +217,15 @@ Everything is a plain file you own, and Synapse tries hard not to lose any of it
 
 ## Roadmap ideas
 
-- Image / PDF thumbnails rendered on graph nodes
+- Workspace tabs & multi-graph engine (tactile tab spawning, cross-tab routing, split panes)
+- Mitosis animations for merge/split transitions
+- Image / PDF thumbnails and in-node file previews
 - Timeline / "what did I think about this week" time-lapse
-- Local-graph mode with an adjustable hop count
 - Orphan detector (notes nothing links to)
+- Encrypted local vaults and air-gapped LAN sync
+- Skill trees: progression locks, learning-tag pathways, questionnaire onboarding
+- Headless CLI, webhooks, and an embedded macro engine
+- Browser capture extension; Android / iOS clients
 - Optional AI fallback for ambiguous notes (hybrid filing)
 - Code-signed installer to remove the SmartScreen warning
 

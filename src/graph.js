@@ -9,6 +9,20 @@
                    '#61c0e0', '#e0d15e', '#8fce5e', '#ff8a7a', '#9aa7b5'];
   const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 
+  // Lighten (amount > 0) or darken (amount < 0) a #rrggbb colour.
+  function shade(hex, amount) {
+    const h = String(hex).replace('#', '');
+    const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+    const num = parseInt(full, 16);
+    if (isNaN(num)) return hex;
+    const mix = amount >= 0 ? 255 : 0, t = Math.abs(amount);
+    const ch = (shift) => {
+      const v = (num >> shift) & 255;
+      return Math.round(v + (mix - v) * clamp(t, 0, 1));
+    };
+    return '#' + [ch(16), ch(8), ch(0)].map(v => v.toString(16).padStart(2, '0')).join('');
+  }
+
   const DEFAULT_CFG = {
     palette: PALETTE, background: 'dots',          // dots | grid | solid | none
     gridColor: 'rgba(160,175,195,0.16)', gridSpacing: 40,
@@ -56,7 +70,14 @@
       if (on) { this.reheat(.3); requestAnimationFrame(() => this._tick()); }
     }
 
-    setConfig(patch) { Object.assign(this.cfg, patch || {}); if (patch && patch.folderColors) this.folderColorOverride = patch.folderColors; this._sizeNodes(); this.reheat(.4); }
+    // Undefined values must never land in cfg: a vault config written by an older
+    // build is missing keys, and `nodeScale: undefined` turns every radius into
+    // NaN, which silently blanks the whole graph.
+    setConfig(patch) {
+      for (const [k, v] of Object.entries(patch || {})) if (v !== undefined) this.cfg[k] = v;
+      if (patch && patch.folderColors) this.folderColorOverride = patch.folderColors;
+      this._sizeNodes(); this.reheat(.4);
+    }
     setData(data) {
       const prev = this.map, w = this.canvas.clientWidth || 900, h = this.canvas.clientHeight || 600;
       this.folderColor.clear();
@@ -78,17 +99,62 @@
       for (const l of this.links) { this._deg.set(l.source.id, (this._deg.get(l.source.id) || 0) + 1); this._deg.set(l.target.id, (this._deg.get(l.target.id) || 0) + 1); }
       this._sizeNodes(); this.reheat(1);
     }
+    // Gravitational mass mapping: a note's radius reflects how much substance it
+    // carries (body length) and how connected it is (degree). Heavy nodes are
+    // also harder to push around in _step, so dense concepts sit still and light
+    // ones drift into orbit around them.
     _sizeNodes() {
       const c = this.cfg, deg = this._deg || new Map();
+      const massOn = c.massMapping !== false;
       for (const n of this.nodes) {
-        if (n.type === 'folder') n.r = (c.folderBase + c.folderGrow * Math.sqrt(n.noteCount || 0));
-        else if (n.type === 'note') n.r = (6 + Math.min(9, (deg.get(n.id) || 0) * 1.2)) * c.nodeScale;
-        else n.r = 0; // root
+        if (n.type === 'folder') {
+          n.r = (c.folderBase + c.folderGrow * Math.sqrt(n.noteCount || 0));
+          n.mass = 6 + Math.sqrt(n.noteCount || 0);
+        } else if (n.type === 'note') {
+          const d = deg.get(n.id) || 0;
+          const linkPart = Math.min(9, d * 1.2);
+          // body length contributes on a log curve: 0 chars -> 0, 2k chars -> ~5
+          const bodyPart = massOn ? Math.min(6, Math.log10(1 + (n.mass || 0)) * 1.6) : 0;
+          n.r = (6 + linkPart + bodyPart) * c.nodeScale;
+          n.weight = massOn ? 1 + linkPart * 0.18 + bodyPart * 0.22 : 1;
+        } else { n.r = 0; n.weight = 1; }
       }
+    }
+
+    // Dynamic colour inheritance: a sub-node takes its parent folder's hue,
+    // shaded lighter or darker by depth so nesting reads at a glance.
+    colorForNode(n) {
+      if (!n) return '#9aa7b5';
+      const base = this.colorFor(n.folder);
+      if (this.cfg.colorInherit === false) return base;
+      let depth = 0, p = n.parentRef;
+      while (p && p.type !== 'root' && depth < 6) { depth++; p = p.parentRef; }
+      if (depth <= 1) return base;
+      return shade(base, (depth - 1) * (n.type === 'folder' ? -0.10 : 0.12));
     }
 
     setSearch(s) { this.search = (s || '').toLowerCase().trim(); }
     setEdgeTypes(set) { this.filterEdges = set; }
+    // world coordinates of a screen point — used to create notes where you clicked
+    worldAt(px, py) { return this._toWorld(px, py); }
+    // the deepest folder bubble containing a world point (null = vault root)
+    folderAtWorld(wx, wy) {
+      let best = null, bestR = 1e9; const memo = new Map();
+      for (const n of this.nodes) {
+        if (n.type !== 'folder') continue;
+        if (this._nodeAlpha(n, memo) <= .02 && !this.lensTargets) continue;
+        if ((n.x - wx) ** 2 + (n.y - wy) ** 2 <= n.r * n.r && n.r < bestR) { best = n; bestR = n.r; }
+      }
+      return best;
+    }
+    selectAllVisible() {
+      const memo = new Map();
+      for (const n of this.nodes) {
+        if (n.type !== 'note') continue;
+        if (this._nodeAlpha(n, memo) > .02) this.selected.add(n.id);
+      }
+      this.h.onSelectionChange && this.h.onSelectionChange([...this.selected]);
+    }
     colorFor(folder) { return this.folderColorOverride[folder] || this.folderColor.get(folder) || '#9aa7b5'; }
     reheat(a = .6) { this.alpha = Math.max(this.alpha, a); }
     getSelection() { return [...this.selected]; }
@@ -103,9 +169,120 @@
     }
     clearFocus() { this.focusSet = null; }
 
+    // ---------- flare ----------
+    // Selecting a topic sends a light pulse out along its edges, brightening
+    // what it touches while the rest of the graph dims.
+    flare(id) {
+      const n = this.map.get(id); if (!n) return;
+      const reached = new Map([[id, 0]]);
+      const frontier = [id];
+      const MAX_HOPS = 2;
+      while (frontier.length) {
+        const cur = frontier.shift();
+        const hop = reached.get(cur);
+        if (hop >= MAX_HOPS) continue;
+        for (const l of this.links) {
+          let other = null;
+          if (l.source.id === cur) other = l.target.id;
+          else if (l.target.id === cur) other = l.source.id;
+          if (other && !reached.has(other)) { reached.set(other, hop + 1); frontier.push(other); }
+        }
+      }
+      this._flare = { ids: reached, t0: performance.now(), dur: 1400 / this.cfg.animSpeed };
+      this.reheat(.2);
+    }
+    _flareState() {
+      const f = this._flare;
+      if (!f) return null;
+      const p = (performance.now() - f.t0) / f.dur;
+      if (p >= 1) { this._flare = null; return null; }
+      return { f, p };
+    }
+    // How lit a node is right now: 0 = untouched, 1 = fully illuminated.
+    _flareGlow(n, state) {
+      if (!state) return 0;
+      const hop = state.f.ids.get(n.id);
+      if (hop == null) return 0;
+      // the pulse travels outward: each hop lights up a little later
+      const start = hop * 0.22;
+      const local = (state.p - start) / 0.42;
+      if (local <= 0) return 0;
+      return local >= 1 ? Math.max(0, 1 - (state.p - 0.55) / 0.45) : local;
+    }
+
+    // ---------- lens engine ----------
+    // One-click structural reshape. Each lens assigns target positions; nodes
+    // then float and magnetically snap into the new arrangement.
+    setLens(name) {
+      this.lens = name || null;
+      if (!name || name === 'free') { this.lensTargets = null; this.reheat(.9); this._emitLens(); return; }
+      const notes = this.nodes.filter(n => n.type === 'note');
+      const w = this.canvas.clientWidth || 900, h = this.canvas.clientHeight || 600;
+      const cx = w / 2, cy = h / 2;
+      const targets = new Map();
+
+      if (name === 'mind') {
+        // Temporal: recently touched thoughts pulled to the centre, stale ones
+        // pushed to the rim.
+        const times = notes.map(n => Date.parse(n.created || '') || 0);
+        const newest = Math.max(...times, 1), oldest = Math.min(...times.filter(Boolean), newest);
+        const span = Math.max(1, newest - oldest);
+        const sorted = notes.slice().sort((a, b) => (Date.parse(b.created || '') || 0) - (Date.parse(a.created || '') || 0));
+        sorted.forEach((n, i) => {
+          const age = 1 - ((Date.parse(n.created || '') || oldest) - oldest) / span;   // 0 = newest
+          const radius = 60 + age * Math.min(w, h) * 0.42;
+          const ang = i * 2.399963;                                                    // golden angle
+          targets.set(n.id, { x: cx + Math.cos(ang) * radius, y: cy + Math.sin(ang) * radius });
+        });
+      } else if (name === 'skills') {
+        // Prerequisite tree: depth by parent chain, laid out in tidy rows.
+        const depthOf = (n) => { let d = 0, p = n; const seen = new Set();
+          while (p && p.parentNote && !seen.has(p.id) && d < 12) { seen.add(p.id); p = this.map.get(p.parentNote); d++; }
+          return d; };
+        const rows = new Map();
+        for (const n of notes) { const d = depthOf(n); if (!rows.has(d)) rows.set(d, []); rows.get(d).push(n); }
+        const depths = [...rows.keys()].sort((a, b) => a - b);
+        const rowGap = Math.max(90, Math.min(160, h / Math.max(1, depths.length)));
+        depths.forEach((d, ri) => {
+          const row = rows.get(d).sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+          const gap = Math.min(120, Math.max(48, w * 0.8 / Math.max(1, row.length)));
+          const startX = cx - (row.length - 1) * gap / 2;
+          row.forEach((n, i) => targets.set(n.id, { x: startX + i * gap, y: cy - (depths.length - 1) * rowGap / 2 + ri * rowGap }));
+        });
+      } else if (name === 'knowledge') {
+        // Dense encyclopedic clusters: tight packed rings, one per folder.
+        const byFolder = new Map();
+        for (const n of notes) { const f = n.folder || 'Inbox'; if (!byFolder.has(f)) byFolder.set(f, []); byFolder.get(f).push(n); }
+        const folders = [...byFolder.keys()].sort();
+        const ringR = Math.min(w, h) * 0.34;
+        folders.forEach((f, fi) => {
+          const ang = (fi / Math.max(1, folders.length)) * Math.PI * 2;
+          const gx = cx + Math.cos(ang) * ringR, gy = cy + Math.sin(ang) * ringR;
+          const group = byFolder.get(f);
+          const per = Math.ceil(Math.sqrt(group.length));
+          const cell = 26;
+          group.forEach((n, i) => {
+            const col = i % per, row = Math.floor(i / per);
+            targets.set(n.id, {
+              x: gx + (col - (per - 1) / 2) * cell,
+              y: gy + (row - (Math.ceil(group.length / per) - 1) / 2) * cell
+            });
+          });
+        });
+      }
+
+      // remember where everything was, so we can ghost the old positions
+      this.lensGhosts = notes.map(n => ({ x: n.x, y: n.y, id: n.id, color: this.colorForNode(n) }));
+      this.lensGhostT0 = performance.now();
+      this.lensTargets = targets;
+      this.reheat(1);
+      this._emitLens();
+    }
+    _emitLens() { this.h.onLensChange && this.h.onLensChange(this.lens || 'free'); }
+
     // ---------- physics ----------
     _step() {
-      if (this.alpha < .004) return;
+      if (this.alpha < .004 && !this.lensTargets) return;
       const c = this.cfg, w = this.canvas.clientWidth || 900, h = this.canvas.clientHeight || 600;
       const groups = new Map();
       for (const n of this.nodes) { if (n.type === 'root') continue; const g = n.containerId || ''; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(n); }
@@ -114,7 +291,9 @@
           for (let j = i + 1; j < sib.length; j++) {
             const a = sib[i], b = sib[j]; let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy || .01;
             const d = Math.sqrt(d2), f = c.repulsion / d2, fx = dx / d * f, fy = dy / d * f;
-            a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+            // heavier nodes shrug off the shove; lighter ones get pushed into orbit
+            const wa = a.weight || 1, wb = b.weight || 1;
+            a.vx += fx / wa; a.vy += fy / wa; b.vx -= fx / wb; b.vy -= fy / wb;
           }
       for (const l of this.links) {
         const rest = l.type === 'wikilink' ? 84 : l.type === 'parent' ? 70 : 150;
@@ -122,8 +301,24 @@
         let dx = l.target.x - l.source.x, dy = l.target.y - l.source.y, d = Math.sqrt(dx * dx + dy * dy) || .01, f = (d - rest) * kk;
         const fx = dx / d * f, fy = dy / d * f; l.source.vx += fx; l.source.vy += fy; l.target.vx -= fx; l.target.vy -= fy;
       }
+      // A lens overrides the usual containment forces: notes are magnetically
+      // drawn to their assigned slot instead of orbiting their folder.
+      if (this.lensTargets) {
+        for (const n of this.nodes) {
+          if (n === this.dragNode) continue;
+          const t = this.lensTargets.get(n.id);
+          if (!t) continue;
+          n.vx += (t.x - n.x) * 0.14;
+          n.vy += (t.y - n.y) * 0.14;
+          n.vx *= .74; n.vy *= .74;
+          n.x += n.vx * Math.max(this.alpha, .35);
+          n.y += n.vy * Math.max(this.alpha, .35);
+        }
+      }
+
       for (const n of this.nodes) {
         if (n.type === 'root') continue;
+        if (this.lensTargets && this.lensTargets.has(n.id)) continue;   // lens owns this node
         const p = n.parentRef;
         if (p && p.type !== 'root') {
           let dx = n.x - p.x, dy = n.y - p.y, d = Math.hypot(dx, dy) || .01;
@@ -160,6 +355,9 @@
     // (unchanged behavior). In 'stagger' mode each sibling reveals in index order
     // as you zoom in, and fades back out in reverse as you zoom out.
     _nodeAlpha(n, memo) {
+      // Under a lens the folder bubbles are dissolved and every note is on show,
+      // so semantic zoom is bypassed entirely.
+      if (this.lensTargets) return n.type === 'note' ? 1 : 0;
       const cid = n.containerId;
       if (!cid) return 1;
       const container = this.map.get(cid);
@@ -194,11 +392,17 @@
       const memo = new Map();
       const aOf = n => this._nodeAlpha(n, memo);
       const expanded = n => n.type === 'folder' && this._containerAlpha(n.id, memo) > .02;
-      const focusDim = n => (this.focusSet && !this.focusSet.has(n.id)) ? .12 : 1;
+      const flareState = this._flareState();
+      const focusDim = n => {
+        if (flareState) return 0.16 + 0.84 * this._flareGlow(n, flareState);
+        return (this.focusSet && !this.focusSet.has(n.id)) ? .12 : 1;
+      };
+
+      this._drawLensGhosts(ctx, t);
 
       // folder bubbles
       for (const f of this.nodes.filter(n => n.type === 'folder' && aOf(n) > .02).sort((a, b) => b.r - a.r)) {
-        const a = aOf(f) * focusDim(f), col = this.colorFor(f.folder);
+        const a = aOf(f) * focusDim(f), col = this.colorForNode(f);
         ctx.globalAlpha = a * (expanded(f) ? .5 : 1);
         ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 7);
         if (expanded(f)) { ctx.fillStyle = 'rgba(124,156,255,0.05)'; ctx.fill(); ctx.lineWidth = 1.5 / t.k; ctx.strokeStyle = col; ctx.globalAlpha = a * .6; ctx.stroke(); }
@@ -237,8 +441,18 @@
         const hit = this.search && n.search && n.search.includes(this.search), dim = this.search && !hit;
         let a = aOf(n) * focusDim(n); if (hit) a = Math.max(a, .9);
         if (a <= .02) continue;
-        ctx.globalAlpha = a * (dim ? .25 : 1); ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 7);
-        ctx.fillStyle = this.colorFor(n.folder); ctx.fill();
+        const glow = flareState ? this._flareGlow(n, flareState) : 0;
+        ctx.globalAlpha = a * (dim ? .25 : 1);
+        if (glow > .02) {
+          // the pulse arriving: a soft halo that fades as it passes
+          ctx.beginPath(); ctx.arc(n.x, n.y, n.r + (6 + glow * 10) / t.k, 0, 7);
+          ctx.fillStyle = this.colorForNode(n); ctx.globalAlpha = a * glow * .28; ctx.fill();
+          ctx.globalAlpha = a * (dim ? .25 : 1);
+        }
+        ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 7);
+        ctx.fillStyle = this.colorForNode(n); ctx.fill();
+        // burner notes get a dashed rim that empties as their time runs out
+        if (n.expires) this._drawBurner(ctx, n, t, a);
         if (this.selected.has(n.id) || n === this.hover || hit || n.id === this.opened) { ctx.lineWidth = 2 / t.k; ctx.strokeStyle = '#fff'; ctx.stroke(); }
         if (showLabel || n === this.hover || hit) {
           ctx.globalAlpha = a * (dim ? .3 : 1); ctx.fillStyle = '#e6edf3';
@@ -252,6 +466,7 @@
       this._drawHeldAndLink(ctx, t);
       // overlays in screen space
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this._drawMarquee(ctx);
       if (this.cfg.showMinimap) this._drawMinimap(ctx, W, H);
       if (this._awake !== false) requestAnimationFrame(() => this._tick());
     }
@@ -264,6 +479,56 @@
       if (bg === 'grid') { ctx.beginPath(); for (let x = ox; x < W; x += S) { ctx.moveTo(x, 0); ctx.lineTo(x, H); } for (let y = oy; y < H; y += S) { ctx.moveTo(0, y); ctx.lineTo(W, y); } ctx.stroke(); }
       else { for (let x = ox; x < W; x += S) for (let y = oy; y < H; y += S) { ctx.beginPath(); ctx.arc(x, y, 1.1, 0, 7); ctx.fill(); } }
     }
+    // Faint traces of where nodes sat before a lens rearranged them, so the
+    // reshape reads as movement rather than teleportation.
+    _drawLensGhosts(ctx, t) {
+      if (!this.lensGhosts) return;
+      const p = (performance.now() - this.lensGhostT0) / (1600 / this.cfg.animSpeed);
+      if (p >= 1) { this.lensGhosts = null; return; }
+      ctx.globalAlpha = (1 - p) * .35;
+      for (const g of this.lensGhosts) {
+        const now = this.map.get(g.id);
+        ctx.beginPath(); ctx.arc(g.x, g.y, 3 / t.k, 0, 7);
+        ctx.fillStyle = g.color; ctx.fill();
+        if (now) {
+          ctx.beginPath(); ctx.moveTo(g.x, g.y); ctx.lineTo(now.x, now.y);
+          ctx.strokeStyle = g.color; ctx.lineWidth = .6 / t.k;
+          ctx.setLineDash([2 / t.k, 4 / t.k]); ctx.stroke(); ctx.setLineDash([]);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Dashed rim showing how much life a burner note has left.
+    _drawBurner(ctx, n, t, a) {
+      const exp = Date.parse(n.expires);
+      if (!exp) return;
+      const created = Date.parse(n.created || '') || (exp - 86400000);
+      const left = clamp((exp - Date.now()) / Math.max(1, exp - created), 0, 1);
+      ctx.save();
+      ctx.globalAlpha = a * .9;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r + 3.5 / t.k, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * left);
+      ctx.strokeStyle = left < .2 ? '#f0785e' : '#e0d15e';
+      ctx.lineWidth = 1.6 / t.k;
+      ctx.setLineDash([2.5 / t.k, 2.5 / t.k]);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Ctrl+drag on empty space draws a selection box over many nodes at once.
+    _drawMarquee(ctx) {
+      const m = this.marquee; if (!m) return;
+      const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+      const w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(124,156,255,0.10)';
+      ctx.strokeStyle = 'rgba(124,156,255,0.85)';
+      ctx.lineWidth = 1;
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeRect(x + .5, y + .5, w, h);
+    }
+
     _drawRipples(ctx, t) {
       if (!this.ripples.length) return; const now = performance.now();
       this.ripples = this.ripples.filter(r => now - r.t0 < r.dur);
@@ -275,6 +540,14 @@
       ctx.globalAlpha = 1;
     }
     _drawHeldAndLink(ctx, t) {
+      // dragging a note over a valid drop target: ring it so the gesture is legible
+      if (this.dropTarget && this.dragNode) {
+        const col = this.dropTarget.type === 'folder' ? '#5ec8a0' : '#f0a35e';
+        this._ring(ctx, this.dropTarget, col, t);
+        ctx.globalAlpha = .10; ctx.beginPath();
+        ctx.arc(this.dropTarget.x, this.dropTarget.y, this.dropTarget.r + 6 / t.k, 0, 7);
+        ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = 1;
+      }
       if (this.held) {
         const g = this.ghost;
         ctx.globalAlpha = .32; ctx.beginPath(); ctx.ellipse(g.x + 3 / t.k, g.y + 6 / t.k, this.held.r * 1.6, this.held.r * .7, 0, 0, 7); ctx.fillStyle = '#000'; ctx.fill();
@@ -387,6 +660,11 @@
         if (this._inMinimap(e.offsetX, e.offsetY)) { this._minimapJump(e.offsetX, e.offsetY); this.panning = false; downNode = null; return; }
         const n = this._nodeAt(e.offsetX, e.offsetY); downNode = n;
         if (n && (e.ctrlKey || e.metaKey) && n.type === 'note') { this.linkFrom = n; this.ghost = this._toWorld(e.offsetX, e.offsetY); return; }
+        // Ctrl+drag on empty space = rubber-band multi-select
+        if (!n && (e.ctrlKey || e.metaKey)) {
+          this.marquee = { x0: e.offsetX, y0: e.offsetY, x1: e.offsetX, y1: e.offsetY, add: e.shiftKey };
+          this.panning = false; return;
+        }
         if (n) { this.dragNode = n; startLP(n); this.reheat(.5); }
         else { this.panning = true; c.style.cursor = 'grabbing'; }
       });
@@ -395,14 +673,59 @@
         const r = c.getBoundingClientRect(), ox = e.clientX - r.left, oy = e.clientY - r.top;
         if (Math.abs(ox - downX) + Math.abs(oy - downY) > 5) { moved = true; this._clearLP(); }
         const wp = this._toWorld(ox, oy);
+        if (this.marquee) { this.marquee.x1 = ox; this.marquee.y1 = oy; return; }
         if (this.held || this.linkFrom) { this.ghost = wp; return; }
-        if (this.dragNode) { this.dragNode.x = wp.x; this.dragNode.y = wp.y; this.reheat(.35); }
+        if (this.dragNode) {
+          this.dragNode.x = wp.x; this.dragNode.y = wp.y; this.reheat(.35);
+          // live target highlight while dragging a note over something droppable
+          this.dropTarget = (this.dragNode.type === 'note' && moved)
+            ? this._nodeAtWorld(wp.x, wp.y, this.dragNode) : null;
+        }
         else if (this.panning) { this.transform.x += e.movementX; this.transform.y += e.movementY; this.anim = null; this.panVel = { x: e.movementX, y: e.movementY }; }
         else { const prev = this.hover; this.hover = this._nodeAt(ox, oy); c.style.cursor = this.hover ? 'pointer' : 'grab'; if (this.hover !== prev) this._hoverChanged(ox, oy); }
       });
 
       window.addEventListener('mouseup', e => {
         this._clearLP(); const r = c.getBoundingClientRect(), ox = e.clientX - r.left, oy = e.clientY - r.top;
+
+        if (this.marquee) {
+          const m = this.marquee; this.marquee = null;
+          const x0 = Math.min(m.x0, m.x1), x1 = Math.max(m.x0, m.x1);
+          const y0 = Math.min(m.y0, m.y1), y1 = Math.max(m.y0, m.y1);
+          if (Math.abs(x1 - x0) > 4 && Math.abs(y1 - y0) > 4) {
+            if (!m.add) this.selected.clear();
+            const a = this._toWorld(x0, y0), b = this._toWorld(x1, y1), memo = new Map();
+            for (const n of this.nodes) {
+              if (n.type === 'root') continue;
+              if (this._nodeAlpha(n, memo) <= .02) continue;
+              if (n.x >= a.x && n.x <= b.x && n.y >= a.y && n.y <= b.y) this.selected.add(n.id);
+            }
+            this.h.onSelectionChange && this.h.onSelectionChange([...this.selected]);
+          }
+          this.dragNode = null; this.panning = false; downNode = null; downOnCanvas = false;
+          return;
+        }
+
+        // Dropping a dragged note onto something is the "caveman" gesture:
+        // onto a folder files it there, onto another note nests it beneath.
+        if (this.dragNode && this.dragNode.type === 'note' && moved) {
+          const tgt = this.dropTarget;
+          this.dropTarget = null;
+          if (tgt && tgt.type === 'folder' && tgt.id !== this.dragNode.containerId && this.h.onDropInFolder) {
+            const dropped = this.dragNode;
+            this.dragNode = null; this.panning = false; downNode = null; downOnCanvas = false;
+            this.h.onDropInFolder(dropped.id, tgt.id);
+            return;
+          }
+          if (tgt && tgt.type === 'note' && this.h.onMakeChild) {
+            const dropped = this.dragNode;
+            this.dragNode = null; this.panning = false; downNode = null; downOnCanvas = false;
+            this.h.onMakeChild(dropped.id, tgt.id);
+            return;
+          }
+        }
+        this.dropTarget = null;
+
         if (this.held) { const tgt = this._nodeAtWorld(this.ghost.x, this.ghost.y, this.held); if (tgt && this.h.onMakeChild) this.h.onMakeChild(this.held.id, tgt.id); this.held = null; return; }
         if (this.linkFrom) { const tgt = this._nodeAtWorld(this.ghost.x, this.ghost.y, this.linkFrom); if (tgt && tgt.type === 'note' && this.h.onMakeLink) this.h.onMakeLink(this.linkFrom.id, tgt.id); this.linkFrom = null; return; }
         if (!moved && downNode) {

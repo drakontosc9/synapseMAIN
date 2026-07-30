@@ -54,6 +54,32 @@
       <canvas id="graph"></canvas>
       <div class="legend" id="legend"></div>
 
+      <!-- lens engine: one-click structural reshape -->
+      <div id="lensbar" class="lensbar">
+        <button class="lens active" data-lens="free" title="Folder bubbles, physics as normal">Free</button>
+        <button class="lens" data-lens="mind" title="Recent thoughts pulled to the centre">My Mind</button>
+        <button class="lens" data-lens="skills" title="Prerequisite tree by parent chain">My Skills</button>
+        <button class="lens" data-lens="knowledge" title="Dense clusters by subject">Knowledge</button>
+      </div>
+
+      <!-- in-graph note creation -->
+      <div id="spawn" class="spawn hidden">
+        <div class="spawn-where" id="spawnWhere"></div>
+        <textarea id="spawnInput" class="spawn-input" rows="2" placeholder="New thought here…"></textarea>
+        <div class="spawn-actions">
+          <label class="spawn-ttl"><input type="checkbox" id="spawnBurner"> burner
+            <select id="spawnTtl" class="spawn-ttlsel">
+              <option value="1">1h</option>
+              <option value="24" selected>24h</option>
+              <option value="168">7d</option>
+            </select>
+          </label>
+          <span class="spawn-hint"><kbd>Enter</kbd> save · <kbd>Esc</kbd> cancel</span>
+        </div>
+      </div>
+
+      <div id="dropzone" class="dropzone hidden"><div class="dropzone-inner">Drop files to import</div></div>
+
       <div id="selbar" class="selbar hidden">
         <span id="selcount"></span>
         <button id="groupSelected" class="primary small">Group into folder</button>
@@ -91,6 +117,7 @@
         </div>
         <div class="panel-foot">
           <button id="moveNoteBtn" class="ghost small">Move…</button>
+          <button id="openFolderBtn" class="ghost small">Open folder</button>
           <button id="deleteNoteBtn" class="ghost small danger">Delete</button>
         </div>
         <div id="panelBacklinks" class="panel-section"></div>

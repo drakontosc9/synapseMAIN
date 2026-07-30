@@ -325,6 +325,63 @@ button { cursor: pointer; font-family: var(--font); }
 .setting label { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 13.5px; cursor: pointer; }
 .setting .muted { color: var(--muted); }
 
+/* ---------- LENS BAR ---------- */
+.lensbar {
+  position: absolute;
+  top: 14px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 4px;
+  background: rgba(27,33,41,.92);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px;
+  backdrop-filter: blur(6px);
+  z-index: 12;
+}
+.lens {
+  background: transparent; border: none; color: var(--muted);
+  border-radius: 7px; padding: 6px 12px; font-size: 12.5px;
+}
+.lens:hover { color: var(--text); }
+.lens.active { background: var(--accent); color: #0e1116; font-weight: 600; }
+
+/* ---------- IN-GRAPH SPAWN ---------- */
+.spawn {
+  position: absolute;
+  width: 280px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 14px 40px rgba(0,0,0,.5);
+  z-index: 22;
+}
+.spawn-where { font-size: 10.5px; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+.spawn-input {
+  width: 100%; resize: none; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px;
+  color: var(--text); font-family: var(--font); font-size: 14px;
+  padding: 8px 10px; outline: none;
+  -webkit-user-select: text; user-select: text;
+}
+.spawn-input:focus { border-color: var(--accent); }
+.spawn-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 7px; gap: 8px; }
+.spawn-ttl { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.spawn-ttlsel { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 5px; font-size: 11px; padding: 1px 3px; }
+.spawn-hint { font-size: 10.5px; color: var(--muted); }
+
+/* ---------- DROPZONE ---------- */
+.dropzone {
+  position: absolute; inset: 0; z-index: 45;
+  background: rgba(14,17,22,.72);
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.dropzone-inner {
+  border: 2px dashed var(--accent); border-radius: 18px;
+  padding: 40px 64px; font-size: 18px; font-weight: 600; color: var(--accent);
+  background: rgba(124,156,255,.06);
+}
+
 /* ---------- RECENTS ---------- */
 .recents {
   position: absolute;

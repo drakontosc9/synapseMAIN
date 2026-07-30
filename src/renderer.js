@@ -31,13 +31,14 @@ const THEMES = {
     onNodeClick: openNote,
     onBackgroundClick: () => { closePanel(); hideCtx(); hideSearch(); },
     onPickup: () => showHint('Carrying a note — drop it on another to make it a <b>child</b>. Release on empty space to cancel.'),
-    onMakeChild: makeChild, onMakeLink: makeLink,
+    onMakeChild: makeChild, onMakeLink: makeLink, onDropInFolder: dropInFolder,
     onSelectionChange: updateSelbar, onContextMenu: showCtx,
     onBreadcrumb: renderBreadcrumb, onFocusGraph: onFocusGraph,
     onHover: showHoverCard, onHoverEnd: hideHoverCard
   });
 
   wireCapture(); wireWorkspace(); wireSettings(); wirePalette(); wireAsk();
+  wireSpawn(); wireLens(); wireDropAndPaste();
   applyConfig(config);
   applySettingsToUI();
   if (api.onUpdateStatus) api.onUpdateStatus(d => {
@@ -54,6 +55,13 @@ const THEMES = {
   renderAbout();
 
   await refresh();
+
+  // Smart startup: if the vault already has thoughts in it, the splash screen is
+  // just a door you have to open every launch. Go straight to the workspace.
+  try {
+    const v = await api.vaultHasNotes();
+    if (v && v.hasNotes) showWorkspace(true);
+  } catch {}
 })();
 
 // ---------- main-process events ----------
@@ -159,6 +167,12 @@ function wireWorkspace() {
   el('closeRecents').addEventListener('click', closeRecents);
   el('moveNoteBtn').addEventListener('click', doMoveNote);
   el('deleteNoteBtn').addEventListener('click', () => doDeleteNote());
+  el('openFolderBtn').addEventListener('click', () => currentNote && openFolderInExplorer(currentNote.id));
+  // double-click empty canvas spawns a note right there
+  el('graph').addEventListener('dblclick', e => {
+    if (graph._nodeAt(e.offsetX, e.offsetY)) return;
+    openSpawn(e.clientX, e.clientY);
+  });
   el('newGroupBtn').addEventListener('click', () => createGroup(''));
   el('importBtn').addEventListener('click', onImport);
   el('linkBtn').addEventListener('click', onAddLink);
@@ -207,12 +221,29 @@ function onGlobalKey(e) {
 
   if (e.key === 'Escape') {
     if (askOpen()) { finishAsk(null); return; }
+    if (spawnOpen()) { closeSpawn(); return; }
     if (!el('settingsModal').classList.contains('hidden')) { closeSettings(); return; }
     if (!el('palette').classList.contains('hidden')) { closePalette(); return; }
+    if (!el('recents').classList.contains('hidden')) { closeRecents(); return; }
     hideSearch(); hideCtx();
     return;
   }
-  if (askOpen()) return;          // the dialog handles its own keys
+  if (askOpen() || spawnOpen()) return;   // those handle their own keys
+
+  // Ctrl+Shift+N: spawn a note in the middle of the graph without leaving it
+  if (mod && e.shiftKey && key === 'n') {
+    e.preventDefault();
+    openSpawn(window.innerWidth / 2 - 140, window.innerHeight / 2 - 60);
+    return;
+  }
+  if (mod && key === 'a' && !inTextField(e)) { e.preventDefault(); graph.selectAllVisible(); return; }
+  if (mod && key === 'l' && !inTextField(e)) {
+    e.preventDefault();
+    const order = ['free', 'mind', 'skills', 'knowledge'];
+    const cur = graph.lens || 'free';
+    setLens(order[(order.indexOf(cur) + 1) % order.length]);
+    return;
+  }
 
   if (mod && key === 'k') { e.preventDefault(); openPalette(); return; }
   if (mod && key === 'z') {
@@ -332,6 +363,43 @@ async function makeChild(childId, parentId) {
   pushUndo('parent of ' + short(child.title), async () => { await api.setParent(childId, res.prev); await refresh(); });
   await refresh(); toast('<b>' + short(child.title) + '</b> is now a child of <b>' + short(parent.title) + '</b>');
 }
+// Collision tagging: bumping a note into a folder bubble files it there.
+async function dropInFolder(noteId, folderId) {
+  const note = graph.map.get(noteId), folder = graph.map.get(folderId);
+  if (!note || !folder) return;
+  const from = parentDirOf(noteId);
+  const res = await api.moveNote(noteId, folderId);
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not file that note.'); return; }
+  pushUndo('filing of ' + short(note.title), async () => { await api.moveNote(res.to, from); await refresh(); });
+  await refresh();
+  if (config.ripples) graph.rippleNote(res.to);
+  toast('<b>' + short(note.title) + '</b> filed into <b>' + short(folder.title) + '</b>');
+}
+
+async function toggleBurner(node) {
+  if (node.expires) {
+    const r = await api.setNoteTtl(node.id, 0);
+    if (!r || !r.ok) { toast('Could not update that note.'); return; }
+    await refresh(); toast('Self-destruct cancelled');
+    return;
+  }
+  const r = await askForm({
+    title: 'Burner note',
+    hint: '"' + short(node.title) + '" will delete itself when the timer runs out.',
+    okLabel: 'Set timer',
+    fields: [{ key: 'ttl', label: 'Delete after', value: '24', options: [
+      { value: '1', label: '1 hour' }, { value: '8', label: '8 hours' },
+      { value: '24', label: '1 day' }, { value: '168', label: '7 days' },
+      { value: '720', label: '30 days' }
+    ] }]
+  });
+  if (!r) return;
+  const res = await api.setNoteTtl(node.id, Number(r.ttl));
+  if (!res || !res.ok) { toast('Could not set the timer.'); return; }
+  await refresh();
+  toast('<b>' + short(node.title) + '</b> self-destructs in ' + (Number(r.ttl) >= 24 ? Math.round(Number(r.ttl) / 24) + 'd' : r.ttl + 'h'));
+}
+
 async function makeLink(fromId, toId) {
   const a = graph.map.get(fromId), b = graph.map.get(toId);
   const res = await api.addWikilink(fromId, toId); await refresh();
@@ -445,21 +513,50 @@ function updateSelbar(ids) {
   const canGroup = settings.groupCreate === 'selection' || settings.groupCreate === 'both';
   if (notes.length && canGroup) { el('selbar').classList.remove('hidden'); el('selcount').textContent = notes.length + ' selected'; } else el('selbar').classList.add('hidden');
 }
-function onFocusGraph() { el('focusbar').classList.remove('hidden'); }
+function onFocusGraph(node) {
+  el('focusbar').classList.remove('hidden');
+  if (node && node.id) graph.flare(node.id);   // pulse light along the connections
+}
 
 // ---------- context menu ----------
 function showCtx({ x, y, node }) {
   const m = el('ctxmenu'); m.innerHTML = ''; const mode = settings.groupCreate || 'both'; const canEmpty = mode === 'empty' || mode === 'both';
   const add = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { hideCtx(); fn(); }; m.appendChild(b); };
+  const sep = () => { const d = document.createElement('div'); d.className = 'sep'; m.appendChild(d); };
+
   if (node && node.type === 'note') {
     add('Open', () => openNote(node));
     add('Focus neighborhood', () => { graph.setFocus(node.id); onFocusGraph(); });
+    add('Flare connections', () => graph.flare(node.id));
+    sep();
     add('Move to folder…', async () => { await openNote(node); doMoveNote(); });
     add('Clear parent', async () => { await api.setParent(node.id, null); await refresh(); toast('Parent cleared'); });
+    add(node.expires ? 'Cancel self-destruct' : 'Make it a burner…', () => toggleBurner(node));
+    sep();
+    add('Open containing folder', () => openFolderInExplorer(node.id));
     add('Reveal file', () => api.reveal(node.id));
     add('Delete note…', () => doDeleteNote(node));
-  } else if (node && node.type === 'folder') { add('Zoom into folder', () => graph._zoomToNode(node)); if (canEmpty) add('New group inside', () => createGroup(node.id)); }
-  else { if (canEmpty) add('New group', () => createGroup('')); add('Recent notes', openRecents); add('Fit to view', () => graph.home()); }
+  } else if (node && node.type === 'folder') {
+    add('Zoom into folder', () => graph._zoomToNode(node));
+    add('Open in file explorer', () => openFolderInExplorer(node.id));
+    sep();
+    add('New thought inside', () => openSpawn(x, y));
+    if (canEmpty) add('New group inside', () => createGroup(node.id));
+    add('Rename folder…', () => doRenameFolder(node));
+    add('Change colour…', () => doFolderColor(node));
+    sep();
+    add('Merge into another folder…', () => doMergeFolder(node));
+    add('Delete folder…', () => doDeleteFolder(node));
+  } else {
+    add('New thought here', () => openSpawn(x, y));
+    if (canEmpty) add('New group', () => createGroup(''));
+    sep();
+    add('Recent notes', openRecents);
+    add('Select all visible', () => { graph.selectAllVisible(); });
+    add('Fit to view', () => graph.home());
+    sep();
+    add('Open vault in file explorer', () => openFolderInExplorer(''));
+  }
   if (!m.children.length) return; m.style.left = x + 'px'; m.style.top = y + 'px'; m.classList.remove('hidden');
 }
 function hideCtx() { el('ctxmenu').classList.add('hidden'); }
@@ -745,6 +842,210 @@ function renderRecents() {
   }
 }
 
+// ---------- folder actions ----------
+async function openFolderInExplorer(relId) {
+  const r = await api.openFolder(relId || '');
+  if (!r || !r.ok) toast((r && r.error) || 'Could not open that folder.');
+}
+
+async function doRenameFolder(node) {
+  const name = await askText({
+    title: 'Rename folder', label: 'New name', value: node.title,
+    hint: 'Renames the folder on disk and updates every note inside it.'
+  });
+  if (!name || name === node.title) return;
+  const r = await api.renameFolder(node.id, name);
+  if (!r || !r.ok) { toast((r && r.error) || 'Could not rename that folder.'); return; }
+  await refresh(); toast('Renamed to <b>' + short(r.title) + '</b>');
+}
+
+async function doMergeFolder(node) {
+  const folders = (await api.listFolders()).filter(f => f !== node.id && f.indexOf(node.id + '/') !== 0);
+  const r = await askForm({
+    title: 'Merge "' + short(node.title) + '" into…',
+    hint: 'Moves everything across, then removes the empty folder.',
+    okLabel: 'Merge',
+    fields: [{ key: 'into', label: 'Destination', options: folderOptions(folders), value: '' }]
+  });
+  if (!r) return;
+  const res = await api.mergeFolders(node.id, r.into);
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not merge those folders.'); return; }
+  await refresh();
+  toast('Merged ' + res.moved.length + ' item(s) into <b>' + short(r.into || 'Inbox') + '</b>');
+}
+
+async function doDeleteFolder(node) {
+  const yes = await askConfirm({
+    title: 'Delete folder "' + short(node.title) + '"?',
+    hint: 'The folder and everything in it goes to your system trash, where you can still restore it.',
+    okLabel: 'Move to trash', danger: true
+  });
+  if (!yes) return;
+  const r = await api.deleteFolder(node.id);
+  if (!r || !r.ok) { toast((r && r.error) || 'Could not delete that folder.'); return; }
+  await refresh();
+  toast('Trashed <b>' + short(node.title) + '</b>' + (r.notes ? ' and ' + r.notes + ' note(s)' : ''));
+}
+
+async function doFolderColor(node) {
+  const current = (config.folderColors && config.folderColors[node.folder]) || graph.colorFor(node.folder);
+  const r = await askForm({
+    title: 'Colour for "' + short(node.title) + '"',
+    fields: [{ key: 'color', label: 'Pick a colour', options: COLOR_CHOICES, value: toHex(current) }],
+    okLabel: 'Apply'
+  });
+  if (!r) return;
+  const fc = Object.assign({}, config.folderColors);
+  fc[node.folder] = r.color;
+  await updateConfig({ folderColors: fc });
+  toast('Colour updated');
+}
+
+const COLOR_CHOICES = [
+  { value: '#7c9cff', label: 'Blue' }, { value: '#5ec8a0', label: 'Green' },
+  { value: '#f0a35e', label: 'Amber' }, { value: '#e879a6', label: 'Pink' },
+  { value: '#b98cff', label: 'Violet' }, { value: '#61c0e0', label: 'Cyan' },
+  { value: '#e0d15e', label: 'Yellow' }, { value: '#8fce5e', label: 'Lime' },
+  { value: '#ff8a7a', label: 'Coral' }, { value: '#9aa7b5', label: 'Grey' }
+];
+
+// ---------- in-graph note creation ----------
+let spawnAt = null;
+function openSpawn(screenX, screenY) {
+  showWorkspace(true, true);
+  const world = graph.worldAt(screenX, screenY);
+  const folderNode = graph.folderAtWorld(world.x, world.y);
+  spawnAt = { folder: folderNode ? folderNode.id : null, world };
+  const box = el('spawn');
+  el('spawnWhere').textContent = folderNode ? 'into ' + folderNode.title : 'auto-file by keyword';
+  el('spawnInput').value = '';
+  el('spawnBurner').checked = false;
+  box.style.left = Math.min(screenX, window.innerWidth - 300) + 'px';
+  box.style.top = Math.min(screenY, window.innerHeight - 170) + 'px';
+  box.classList.remove('hidden');
+  el('spawnInput').focus();
+}
+function closeSpawn() { el('spawn').classList.add('hidden'); spawnAt = null; }
+function spawnOpen() { return !el('spawn').classList.contains('hidden'); }
+
+async function commitSpawn() {
+  if (!spawnAt) return;
+  const text = el('spawnInput').value.trim();
+  if (!text) { closeSpawn(); return; }
+  const opts = {};
+  if (el('spawnBurner').checked) opts.ttlHours = Number(el('spawnTtl').value) || 24;
+  const where = spawnAt.folder;
+  closeSpawn();
+  let res;
+  try { res = await api.createNote(text, where, opts); }
+  catch (err) { toast((err && err.message) || 'Could not create that note.'); return; }
+  await refresh();
+  graph.focusNote(res.id);
+  if (config.ripples) graph.rippleNote(res.id);
+  toast(res.guessed
+    ? 'Filed in <b>' + escapeHtml(res.folder) + '</b>'
+    : 'Added to <b>' + escapeHtml(res.folder) + '</b>');
+}
+
+function wireSpawn() {
+  el('spawnInput').addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSpawn(); return; }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitSpawn(); }
+  });
+  el('spawnInput').addEventListener('blur', () => {
+    // let a click on the burner controls keep the box open
+    setTimeout(() => { if (spawnOpen() && !el('spawn').contains(document.activeElement)) closeSpawn(); }, 160);
+  });
+}
+
+// ---------- lens engine ----------
+function wireLens() {
+  document.querySelectorAll('.lens').forEach(b => b.addEventListener('click', () => setLens(b.dataset.lens)));
+}
+function setLens(name) {
+  graph.setLens(name === 'free' ? null : name);
+  document.querySelectorAll('.lens').forEach(b => b.classList.toggle('active', b.dataset.lens === name));
+  const labels = { free: 'Free layout', mind: 'My Mind — recent thoughts at the centre', skills: 'My Skills — prerequisite tree', knowledge: 'Knowledge — clustered by subject' };
+  toast(labels[name] || 'Layout changed');
+}
+
+// ---------- drag & drop / paste import ----------
+function wireDropAndPaste() {
+  const zone = el('dropzone');
+  let depth = 0;
+  const show = () => { depth++; zone.classList.remove('hidden'); };
+  const hide = () => { depth = Math.max(0, depth - 1); if (!depth) zone.classList.add('hidden'); };
+
+  window.addEventListener('dragenter', e => { if (hasFiles(e)) { e.preventDefault(); show(); } });
+  window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('dragleave', e => { if (hasFiles(e)) hide(); });
+  window.addEventListener('drop', async e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0; zone.classList.add('hidden');
+    const paths = api.pathsForFiles(e.dataTransfer.files);
+    if (!paths.length) { toast('Could not read those files.'); return; }
+    await importDropped(paths, e.clientX, e.clientY);
+  });
+
+  window.addEventListener('paste', async e => {
+    if (inTextField({ target: document.activeElement })) return;
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (const it of items) {
+      if (it.kind !== 'file' || it.type.indexOf('image/') !== 0) continue;
+      e.preventDefault();
+      const blob = it.getAsFile();
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      const ext = (it.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      const r = await api.importImageBuffer(buf, 'pasted.' + ext, 'Imported');
+      if (!r || !r.ok) { toast((r && r.error) || 'Could not paste that image.'); return; }
+      await refresh();
+      openNote({ id: r.note.id });
+      toast('Pasted image → <b>' + short(r.note.title) + '</b>');
+      return;
+    }
+  });
+}
+function hasFiles(e) {
+  const dt = e.dataTransfer;
+  return !!dt && Array.from(dt.types || []).indexOf('Files') !== -1;
+}
+
+async function importDropped(paths, screenX, screenY) {
+  // drop inside a folder bubble => import into that folder
+  let folder = 'Imported';
+  if (typeof screenX === 'number' && !el('workspace').classList.contains('hidden')) {
+    const rect = el('graph').getBoundingClientRect();
+    const world = graph.worldAt(screenX - rect.left, screenY - rect.top);
+    const fnode = graph.folderAtWorld(world.x, world.y);
+    if (fnode) folder = fnode.id;
+  }
+  const mdCount = paths.filter(p => /\.(md|markdown)$/i.test(p)).length;
+  let split = false;
+  if (mdCount) {
+    const r = await askForm({
+      title: 'Import ' + paths.length + ' file' + (paths.length === 1 ? '' : 's'),
+      hint: mdCount + ' Markdown file' + (mdCount === 1 ? '' : 's') + ' can be broken into linked sub-notes.',
+      okLabel: 'Import',
+      fields: [
+        { key: 'folder', label: 'Into folder', options: folderOptions(await api.listFolders()).concat([{ value: 'Imported', label: 'Imported (new)' }]), value: folder },
+        { key: 'split', label: 'Markdown handling', value: 'yes', options: [
+          { value: 'yes', label: 'Split on headings into linked sub-notes' },
+          { value: 'no', label: 'Keep each file as one note' }
+        ] }
+      ]
+    });
+    if (!r) return;
+    folder = r.folder; split = r.split === 'yes';
+  }
+  const res = await api.importPaths(paths, { folder, split });
+  if (!res || !res.ok) { toast((res && res.error) || 'Import failed.'); return; }
+  await refresh();
+  if (res.created.length) graph.focusNote(res.created[0].id);
+  const skipped = res.skipped.length ? ' · skipped ' + res.skipped.length : '';
+  toast('Imported <b>' + res.created.length + '</b> note(s)' + skipped);
+}
+
 // Resolve a [[wikilink]] title to a note and open it.
 function openByTitle(name) {
   const want = String(name).split('|')[0].trim().toLowerCase();
@@ -796,6 +1097,13 @@ function renderPalette() {
     { kind: 'action', label: 'New thought', run: () => { closePalette(); newThought(); } },
     { kind: 'action', label: 'Fit / Home', run: () => { closePalette(); graph.home(); } },
     { kind: 'action', label: 'Recent notes', run: () => { closePalette(); openRecents(); } },
+    { kind: 'action', label: 'New thought in the graph', run: () => { closePalette(); openSpawn(window.innerWidth / 2 - 140, window.innerHeight / 2 - 60); } },
+    { kind: 'action', label: 'Open vault in file explorer', run: () => { closePalette(); openFolderInExplorer(''); } },
+    { kind: 'action', label: 'Lens: Free layout', run: () => { closePalette(); setLens('free'); } },
+    { kind: 'action', label: 'Lens: My Mind (recent at centre)', run: () => { closePalette(); setLens('mind'); } },
+    { kind: 'action', label: 'Lens: My Skills (prerequisite tree)', run: () => { closePalette(); setLens('skills'); } },
+    { kind: 'action', label: 'Lens: Knowledge (subject clusters)', run: () => { closePalette(); setLens('knowledge'); } },
+    { kind: 'action', label: 'Import files…', run: async () => { closePalette(); onImport(); } },
     { kind: 'action', label: 'New group', run: () => { closePalette(); createGroup(''); } },
     { kind: 'action', label: 'Save a link', run: () => { closePalette(); onAddLink(); } },
     { kind: 'action', label: 'Move this note to another folder', run: () => { closePalette(); doMoveNote(); } },

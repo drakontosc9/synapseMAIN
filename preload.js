@@ -1,7 +1,14 @@
 // preload.js — safe bridge between the renderer (UI) and main (filesystem).
 // Every entry is a narrow, task-specific function: no raw ipcRenderer, no Node
 // APIs and no channel names reach the page.
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+
+// Turn dropped File objects into real paths. File.path is deprecated in recent
+// Electron, so prefer webUtils and keep the old property as a fallback.
+function pathForFile(file) {
+  try { if (webUtils && webUtils.getPathForFile) return webUtils.getPathForFile(file); } catch {}
+  return file && file.path ? file.path : null;
+}
 
 // Wrap a main-process listener so the renderer only ever receives the payload,
 // never the IpcRendererEvent (which exposes the sender).
@@ -28,6 +35,23 @@ contextBridge.exposeInMainWorld('synapse', {
   importFiles:    ()             => ipcRenderer.invoke('import-files'),
   importLink:     (url, note)    => ipcRenderer.invoke('import-link', url, note),
   newAttachmentNote: (md)        => ipcRenderer.invoke('new-attachment-note', md),
+
+  // creation + import
+  createNote:     (text, folderId, opts) => ipcRenderer.invoke('create-note', text, folderId, opts),
+  importPaths:    (paths, opts)  => ipcRenderer.invoke('import-paths', paths, opts),
+  importImageBuffer: (bytes, name, folderId) => ipcRenderer.invoke('import-image-buffer', bytes, name, folderId),
+  pathsForFiles:  (files)        => Array.from(files || []).map(pathForFile).filter(Boolean),
+
+  // folders
+  openFolder:     (relId)        => ipcRenderer.invoke('open-folder', relId),
+  renameFolder:   (relId, name)  => ipcRenderer.invoke('rename-folder', relId, name),
+  mergeFolders:   (from, into)   => ipcRenderer.invoke('merge-folders', from, into),
+  deleteFolder:   (relId)        => ipcRenderer.invoke('delete-folder', relId),
+
+  // ephemeral notes
+  setNoteTtl:     (relId, hours) => ipcRenderer.invoke('set-note-ttl', relId, hours),
+  purgeExpired:   ()             => ipcRenderer.invoke('purge-expired'),
+  vaultHasNotes:  ()             => ipcRenderer.invoke('vault-has-notes'),
 
   // structure
   setParent:      (child, parent)=> ipcRenderer.invoke('set-parent', child, parent),

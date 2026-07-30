@@ -171,6 +171,133 @@ app.whenReady().then(async () => {
     'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="deleteNote"})||{}).args)'),
     '["Ideas/old.md"]');
 
+  console.log('\nopen folder in explorer:');
+  await js('window.synapse.__reset()');
+  await js('openFolderInExplorer("Ideas/note.md"); 0');
+  await wait(150);
+  ok('note path forwarded to main', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="openFolder"})||{}).args)'),
+    '["Ideas/note.md"]');
+  await js('window.synapse.__reset()');
+  await js('openFolderInExplorer(""); 0');
+  await wait(150);
+  ok('vault root opens too', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="openFolder"})||{}).args)'),
+    '[""]');
+
+  console.log('\nfolder context menu:');
+  await js('showCtx({x:40,y:40,node:{id:"Ideas",type:"folder",title:"Ideas",folder:"Ideas"}})');
+  await wait(120);
+  const folderMenu = await js('JSON.stringify(Array.prototype.map.call(document.querySelectorAll("#ctxmenu button"),function(b){return b.textContent}))');
+  ok('offers explorer', folderMenu.indexOf('Open in file explorer') >= 0, true);
+  ok('offers rename', folderMenu.indexOf('Rename folder') >= 0, true);
+  ok('offers merge', folderMenu.indexOf('Merge into another folder') >= 0, true);
+  ok('offers colour', folderMenu.indexOf('Change colour') >= 0, true);
+  ok('offers delete', folderMenu.indexOf('Delete folder') >= 0, true);
+  await js('hideCtx()');
+
+  console.log('\nin-graph note creation:');
+  await js('window.synapse.__reset()');
+  await js('openSpawn(400, 300)');
+  await wait(150);
+  ok('spawn box opens', await js('!document.getElementById("spawn").classList.contains("hidden")'), true);
+  ok('input focused', await js('document.activeElement.id'), 'spawnInput');
+  await js('document.getElementById("spawnInput").value = "thought from the canvas"');
+  await js('commitSpawn(); 0');
+  await wait(300);
+  ok('createNote called with text', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="createNote"})||{}).args[0])'),
+    '"thought from the canvas"');
+  ok('spawn box closed', await js('document.getElementById("spawn").classList.contains("hidden")'), true);
+
+  console.log('\nburner notes:');
+  await js('window.synapse.__reset()');
+  await js('openSpawn(400, 300)');
+  await wait(120);
+  await js('document.getElementById("spawnInput").value = "temporary"');
+  await js('document.getElementById("spawnBurner").checked = true');
+  await js('document.getElementById("spawnTtl").value = "1"');
+  await js('commitSpawn(); 0');
+  await wait(300);
+  ok('ttl passed through', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="createNote"})||{}).args[2])'),
+    '{"ttlHours":1}');
+
+  console.log('\nlens engine:');
+  await js('graph.setData({folders:["Ideas"],nodes:[' +
+    '{id:"__root__",type:"root",title:"Vault",containerId:null},' +
+    '{id:"Ideas",type:"folder",title:"Ideas",containerId:"__root__",folder:"Ideas",noteCount:3},' +
+    '{id:"Ideas/a.md",type:"note",title:"A",containerId:"Ideas",folder:"Ideas",tags:[],links:[],created:"2026-07-01T00:00:00.000Z",mass:400},' +
+    '{id:"Ideas/b.md",type:"note",title:"B",containerId:"Ideas",folder:"Ideas",tags:[],links:[],created:"2026-07-20T00:00:00.000Z",mass:20},' +
+    '{id:"Ideas/c.md",type:"note",title:"C",containerId:"Ideas",folder:"Ideas",tags:[],links:[],created:"2026-07-28T00:00:00.000Z",mass:900,parentNote:"Ideas/a.md"}' +
+    '],links:[{source:"Ideas/a.md",target:"Ideas/c.md",type:"parent"}],suggestions:[]})');
+  await wait(100);
+  ok('mass affects radius', await js(
+    'graph.map.get("Ideas/c.md").r > graph.map.get("Ideas/b.md").r'), true);
+
+  await js('setLens("mind")');
+  await wait(120);
+  ok('lens targets assigned', await js('graph.lensTargets && graph.lensTargets.size'), 3);
+  ok('notes visible regardless of zoom', await js('graph._nodeAlpha(graph.map.get("Ideas/a.md"), new Map())'), 1);
+  ok('folders dissolve under a lens', await js('graph._nodeAlpha(graph.map.get("Ideas"), new Map())'), 0);
+  ok('newest note lands nearer the centre', await js(
+    '(function(){var t=graph.lensTargets,cx=graph.canvas.clientWidth/2,cy=graph.canvas.clientHeight/2;' +
+    'function d(id){var p=t.get(id);return Math.hypot(p.x-cx,p.y-cy)}' +
+    'return d("Ideas/c.md") < d("Ideas/a.md")})()'), true);
+  ok('ghost traces recorded', await js('graph.lensGhosts.length'), 3);
+
+  await js('setLens("skills")');
+  await wait(120);
+  ok('skills lens lays out rows', await js('graph.lensTargets.size'), 3);
+  ok('child sits below its prerequisite', await js(
+    'graph.lensTargets.get("Ideas/c.md").y > graph.lensTargets.get("Ideas/a.md").y'), true);
+
+  await js('setLens("knowledge")');
+  await wait(120);
+  ok('knowledge lens clusters', await js('graph.lensTargets.size'), 3);
+
+  await js('setLens("free")');
+  await wait(120);
+  ok('free lens releases targets', await js('graph.lensTargets === null'), true);
+  ok('folders come back', await js('graph._nodeAlpha(graph.map.get("Ideas"), new Map()) > 0'), true);
+
+  console.log('\nflare:');
+  await js('graph.flare("Ideas/a.md")');
+  ok('flare reaches linked notes', await js('graph._flare.ids.has("Ideas/c.md")'), true);
+  ok('flare records the origin at hop 0', await js('graph._flare.ids.get("Ideas/a.md")'), 0);
+
+  console.log('\ncollision tagging (drop a note on a folder):');
+  await js('window.synapse.__reset()');
+  await js('dropInFolder("Ideas/b.md", "Ideas"); 0');
+  await wait(250);
+  ok('moveNote called with the folder', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="moveNote"})||{}).args)'),
+    '["Ideas/b.md","Ideas"]');
+
+  console.log('\nmarquee multi-select:');
+  // dropInFolder above triggered a refresh against the stub's empty vault, so
+  // re-seed before asserting on selection
+  await js('graph.setData({folders:["Ideas"],nodes:[' +
+    '{id:"__root__",type:"root",title:"Vault",containerId:null},' +
+    '{id:"Ideas",type:"folder",title:"Ideas",containerId:"__root__",folder:"Ideas",noteCount:3},' +
+    '{id:"Ideas/a.md",type:"note",title:"A",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10},' +
+    '{id:"Ideas/b.md",type:"note",title:"B",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10},' +
+    '{id:"Ideas/c.md",type:"note",title:"C",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10}' +
+    '],links:[],suggestions:[]})');
+  await wait(100);
+  ok('selectAllVisible picks up notes', await js(
+    '(function(){graph.clearSelection();graph.selectAllVisible();return graph.getSelection().length})()'), 3);
+  ok('clearSelection empties it', await js(
+    '(function(){graph.clearSelection();return graph.getSelection().length})()'), 0);
+
+  console.log('\ndrag-and-drop import:');
+  await js('window.synapse.__reset()');
+  await js('importDropped(["C:/tmp/a.txt","C:/tmp/b.png"]); 0');
+  await wait(300);
+  ok('non-markdown imports without a prompt', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="importPaths"})||{}).args[0])'),
+    '["C:/tmp/a.txt","C:/tmp/b.png"]');
+
   console.log('\nquick capture window:');
   const qwin = new BrowserWindow({
     show: false,
