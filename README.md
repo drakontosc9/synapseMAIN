@@ -214,6 +214,30 @@ that route to it. Higher keyword/tag matches win; an explicit `#tag` counts for 
 loose keyword. Add folders, add keywords, reorder freely — changes take effect on the next
 captured thought.
 
+## Shipping an update to yourself
+
+The installed app updates from **GitHub Releases**, not from git. Pushing a commit changes
+nothing for an already-installed copy — `electron-updater` compares the running version
+against the latest Release and replaces the whole app via the NSIS installer.
+
+To ship a change you've committed:
+
+```bash
+npm version patch
+```
+
+That bumps `package.json` and creates a `v*` tag. Then push the tag:
+
+```bash
+git push --follow-tags
+```
+
+CI builds the installer and attaches it (plus `latest.yml`, which the updater reads) to a
+Release. Installed copies pick it up within six hours, or immediately via
+**Help → Check for updates…**. Your vault is untouched by an update.
+
+If you run from source instead, there's nothing to update — `git pull` and restart.
+
 ## Build a Windows installer
 
 CI builds this for you: **Actions → Build Windows app → Run workflow** produces a

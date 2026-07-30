@@ -5,6 +5,10 @@ const { contextBridge } = require('electron');
 const calls = [];
 const rec = (name, result) => (...args) => { calls.push({ name, args }); return Promise.resolve(result); };
 
+// the real preload reads dropped files itself and hands back plain paths;
+// the test drives that callback directly
+let dropCb = null;
+
 contextBridge.exposeInMainWorld('synapse', {
   getVault: rec('getVault', 'C:/tmp/vault'),
   chooseVault: rec('chooseVault', 'C:/tmp/vault'),
@@ -30,7 +34,7 @@ contextBridge.exposeInMainWorld('synapse', {
   attachToNote: rec('attachToNote', { ok: true, attached: [{ name: 'a.txt', kind: 'text' }], children: [], skipped: [] }),
   breakdownFile: rec('breakdownFile', { ok: true, docs: [{ doc: { id: 'Breakdown/doc.md', title: 'Doc' }, parts: [{ id: 'Breakdown/p1.md' }, { id: 'Breakdown/p2.md' }] }], skipped: [], folder: 'Breakdown' }),
   pickFiles: rec('pickFiles', ['C:/tmp/picked.txt']),
-  pathsForFiles: (files) => Array.from(files || []).map(f => f.__testPath || f.name).filter(Boolean),
+  onFilesDropped: (cb) => { dropCb = (typeof cb === 'function') ? cb : null; },
   openFolder: rec('openFolder', { ok: true, path: 'C:/tmp/vault/Ideas' }),
   renameFolder: rec('renameFolder', { ok: true, id: 'Renamed', title: 'Renamed' }),
   mergeFolders: rec('mergeFolders', { ok: true, moved: [{ from: 'a', to: 'b' }], into: 'Tasks' }),
@@ -69,5 +73,7 @@ contextBridge.exposeInMainWorld('synapse', {
 
   // test-only introspection
   __calls: () => calls.slice(),
-  __reset: () => { calls.length = 0; }
+  __reset: () => { calls.length = 0; },
+  __hasDropCb: () => typeof dropCb === 'function',
+  __fireDrop: (info) => { if (dropCb) dropCb(info); }
 });

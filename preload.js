@@ -3,12 +3,48 @@
 // APIs and no channel names reach the page.
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
-// Turn dropped File objects into real paths. File.path is deprecated in recent
-// Electron, so prefer webUtils and keep the old property as a fallback.
+// ---------------------------------------------------------------------------
+// File drops
+//
+// File objects must NEVER cross contextBridge. The bridge clones/proxies its
+// arguments, and webUtils.getPathForFile() requires a genuine File backed by a
+// real blob — handing it a proxy yields empty paths at best and takes the
+// renderer down at worst. The preload shares the page's DOM, so it reads the
+// drop here and passes plain strings across instead.
+// ---------------------------------------------------------------------------
 function pathForFile(file) {
-  try { if (webUtils && webUtils.getPathForFile) return webUtils.getPathForFile(file); } catch {}
-  return file && file.path ? file.path : null;
+  try {
+    if (webUtils && typeof webUtils.getPathForFile === 'function') {
+      const p = webUtils.getPathForFile(file);
+      if (p) return p;
+    }
+  } catch {}
+  // very old Electron kept the path on the File itself
+  return (file && typeof file.path === 'string' && file.path) ? file.path : null;
 }
+
+let dropHandler = null;
+
+window.addEventListener('drop', (e) => {
+  if (!dropHandler || !e.dataTransfer) return;
+  let files = [];
+  try { files = Array.from(e.dataTransfer.files || []); } catch { return; }
+  if (!files.length) return;
+
+  e.preventDefault();
+  const paths = [];
+  for (const f of files) {
+    const p = pathForFile(f);
+    if (p) paths.push(p);
+  }
+  // plain strings and numbers only — safe to send across the bridge
+  try { dropHandler({ paths, x: e.clientX, y: e.clientY, count: files.length }); } catch {}
+}, true);
+
+// Chromium would otherwise navigate the window to the dropped file.
+window.addEventListener('dragover', (e) => {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types || []).indexOf('Files') !== -1) e.preventDefault();
+}, true);
 
 // Wrap a main-process listener so the renderer only ever receives the payload,
 // never the IpcRendererEvent (which exposes the sender).
@@ -43,7 +79,8 @@ contextBridge.exposeInMainWorld('synapse', {
   attachToNote:   (relId, paths, opts) => ipcRenderer.invoke('attach-to-note', relId, paths, opts),
   breakdownFile:  (paths, folderId) => ipcRenderer.invoke('breakdown-file', paths, folderId),
   pickFiles:      (title)        => ipcRenderer.invoke('pick-files', title),
-  pathsForFiles:  (files)        => Array.from(files || []).map(pathForFile).filter(Boolean),
+  // Register the one callback that receives dropped file paths.
+  onFilesDropped: (cb) => { dropHandler = (typeof cb === 'function') ? cb : null; },
 
   // folders
   openFolder:     (relId)        => ipcRenderer.invoke('open-folder', relId),

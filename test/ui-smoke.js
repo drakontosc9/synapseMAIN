@@ -298,6 +298,31 @@ app.whenReady().then(async () => {
     'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="importPaths"})||{}).args[0])'),
     '["C:/tmp/a.txt","C:/tmp/b.png"]');
 
+  // File objects must never cross the context bridge — the preload hands the
+  // renderer plain paths through this callback instead.
+  ok('renderer registered a drop callback', await js('window.synapse.__hasDropCb()'), true);
+  await js('window.synapse.__reset()');
+  await js('window.synapse.__fireDrop({paths:["C:/tmp/dropped.txt"],x:5,y:9999,count:1}); 0');
+  await wait(350);
+  ok('callback paths reach the importer', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="importPaths"})||{}).args[0])'),
+    '["C:/tmp/dropped.txt"]');
+  await js('window.synapse.__reset()');
+  await js('window.synapse.__fireDrop({paths:[],x:5,y:9999,count:2}); 0');
+  await wait(250);
+  ok('unreadable drop imports nothing', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="importPaths"}).length'), 0);
+
+  console.log('\nhidden panes must not render:');
+  ok('pane B is inactive while split is off', await js('panes.b._active'), false);
+  ok('pane B stops looping', await js(
+    '(function(){var n=0;var o=panes.b._tick.bind(panes.b);panes.b._tick=function(){n++;return o()};' +
+    'window.__pbCount=function(){return n};return 1})()'), 1);
+  await wait(600);
+  ok('no frames drawn by the hidden pane', await js('window.__pbCount()'), 0);
+  ok('dpr is defined even when never laid out', await js('typeof panes.b.dpr'), 'number');
+  ok('active pane has a real dpr', await js('panes.a.dpr > 0'), true);
+
   console.log('\ncapture: Enter must never insert a newline:');
   await js('window.synapse.__reset()');
   const fireCapture = (props) => js(
@@ -454,12 +479,24 @@ app.whenReady().then(async () => {
   await js('lastScan = window.__fx; graph.setData(lastScan)');
   await wait(200);
   ok('fixture note is back in the graph', await js('!!graph.map.get("Ideas/a.md")'), true);
-  const noteScreen = JSON.parse(await js(
-    '(function(){var n=graph.map.get("Ideas/a.md");var r=graph.canvas.getBoundingClientRect();' +
-    'var t=graph.transform;return JSON.stringify({x:r.left+n.x*t.k+t.x,y:r.top+n.y*t.k+t.y})})()'));
+  // pin the camera and park the node so the hit-test is deterministic
+  // (physics and earlier lens/camera moves otherwise put it anywhere)
+  // k must be high enough that the containing folder counts as "open", or the
+  // note is legitimately invisible and therefore not hit-testable
+  await js('(function(){graph.transform={x:0,y:0,k:2};graph.anim=null;graph.alpha=0;' +
+    'var f=graph.map.get("Ideas");f.x=150;f.y=150;f.vx=0;f.vy=0;' +
+    'var n=graph.map.get("Ideas/a.md");n.x=150;n.y=150;n.vx=0;n.vy=0;n.r=14;return 1})()');
+  await wait(120);
+  ok('the note is visible at this zoom', await js(
+    'graph._nodeAlpha(graph.map.get("Ideas/a.md"), new Map()) > 0.02'), true);
+
+  // the simulation keeps moving nodes, so locate and hit-test in one evaluation
+  const screenOf = (id) =>
+    '(function(){var n=graph.map.get("' + id + '");var r=graph.canvas.getBoundingClientRect();' +
+    'var t=graph.transform;return {x:r.left+n.x*t.k+t.x,y:r.top+n.y*t.k+t.y}})()';
   ok('a note is the drop target under the cursor', await js(
-    'dropTargetAt(' + noteScreen.x + ',' + noteScreen.y + ').kind'), 'note');
-  await js('routeDroppedFiles(["C:/tmp/spec.txt"],' + noteScreen.x + ',' + noteScreen.y + '); 0');
+    '(function(){var p=' + screenOf('Ideas/a.md') + ';return dropTargetAt(p.x,p.y).kind})()'), 'note');
+  await js('(function(){var p=' + screenOf('Ideas/a.md') + ';routeDroppedFiles(["C:/tmp/spec.txt"],p.x,p.y)})(); 0');
   await wait(350);
   ok('files attach to the note under the cursor', await js(
     'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="attachToNote"})||{}).args.slice(0,2))'),

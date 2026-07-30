@@ -33,16 +33,55 @@ let quickWindow = null;
 let tray = null;
 let isQuitting = false;
 
+// True once the on-disk settings have been read (or shown not to exist). Until
+// then we must not write: an early save would persist bare defaults over a
+// perfectly good config.
+let settingsLoaded = false;
+// Set only when the user deliberately picks (or clears) a vault, so an
+// in-memory null can never silently overwrite a stored path.
+let vaultExplicitlySet = false;
+
 function loadSettings() {
+  let raw = null;
   try {
-    settings = Object.assign(settings, JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')));
+    raw = fs.readFileSync(SETTINGS_PATH, 'utf8');
   } catch (err) {
-    if (err.code !== 'ENOENT') log.warn('could not read settings: ', err);
+    if (err.code === 'ENOENT') { settingsLoaded = true; return; }   // first run
+    log.error('could not read settings: ', err);
+    return;                                                         // stays unloaded: no writes
+  }
+  try {
+    settings = Object.assign(settings, JSON.parse(raw));
+    settingsLoaded = true;
+  } catch (err) {
+    // Corrupt file. Keep a copy so the vault path is recoverable by hand, and
+    // refuse to write until the user makes a deliberate choice.
+    log.error('settings file is not valid JSON — keeping a backup and starting fresh: ', err);
+    try { fs.writeFileSync(SETTINGS_PATH + '.corrupt', raw); } catch {}
+    settingsLoaded = true;
   }
 }
+
 function saveSettings() {
-  try { writeJsonAtomic(SETTINGS_PATH, settings); }
-  catch (err) { log.error('could not save settings — vault choice may not persist: ', err); }
+  if (!settingsLoaded) {
+    log.warn('refusing to save settings before they were loaded');
+    return;
+  }
+  try {
+    // Guard: if we somehow hold no vault but disk remembers one, keep disk's.
+    if (!settings.vaultPath && !vaultExplicitlySet) {
+      try {
+        const onDisk = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+        if (onDisk && onDisk.vaultPath) {
+          log.warn('kept the stored vault path instead of overwriting it with null');
+          settings.vaultPath = onDisk.vaultPath;
+        }
+      } catch {}
+    }
+    writeJsonAtomic(SETTINGS_PATH, settings);
+  } catch (err) {
+    log.error('could not save settings — vault choice may not persist: ', err);
+  }
 }
 
 function rulesPath() { return settings.vaultPath ? path.join(settings.vaultPath, '.synapse', 'rules.json') : null; }
@@ -349,6 +388,16 @@ function buildMenu() {
       label: '&Help',
       submenu: [
         { label: 'How to use Synapse', click: send('open-help') },
+        { label: 'Check for updates…', click: async () => {
+          let r = { message: 'The updater is not available.' };
+          try { r = await require('./updater').checkNow(mainWindow); } catch (err) { log.warn('update check failed: ', err); }
+          log.info('manual update check: ' + r.message);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('update-status',
+              r.ok ? { state: r.version ? 'available' : 'checking', version: r.version }
+                   : { state: 'error', message: r.message });
+          }
+        } },
         { label: 'Open log file', click: () => { const f = log.file(); if (f) shell.showItemInFolder(f); } },
         { type: 'separator' },
         { label: 'About Synapse ' + app.getVersion(), click: () => {
@@ -495,6 +544,7 @@ handle('choose-vault', async () => {
   });
   if (r.canceled || !r.filePaths[0]) return settings.vaultPath;
   settings.vaultPath = r.filePaths[0];
+  vaultExplicitlySet = true;          // a deliberate choice may overwrite disk
   saveSettings();
   ensureVaultScaffold();
   vault.clearCache();

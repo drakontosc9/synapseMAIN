@@ -54,7 +54,7 @@
 
       // The loop used to run forever, so a minimised window still burned a core
       // and drained the battery. Sleep while the page is hidden.
-      this._awake = true;
+      this._awake = true; this._active = true; this._looping = true;
       if (typeof document !== 'undefined' && document.addEventListener) {
         document.addEventListener('visibilitychange', () => this._setAwake(!document.hidden));
         window.addEventListener('blur', () => { if (document.hidden) this._setAwake(false); });
@@ -64,10 +64,24 @@
       requestAnimationFrame(() => this._tick());
     }
 
+    // Two independent reasons to stop: the page is hidden (_awake), or this pane
+    // is not on screen (_active). The loop runs only when both allow it.
+    _shouldRun() { return this._awake !== false && this._active !== false; }
+    _restart() { if (this._shouldRun() && !this._looping) { this._looping = true; requestAnimationFrame(() => this._tick()); } }
+
     _setAwake(on) {
       if (this._awake === on) return;
       this._awake = on;
-      if (on) { this.reheat(.3); requestAnimationFrame(() => this._tick()); }
+      this._looping = false;
+      if (on) { this.reheat(.3); this._restart(); }
+    }
+    /** Called by the host when a pane is shown or hidden. */
+    setActive(on) {
+      const next = !!on;
+      if (this._active === next) return;
+      this._active = next;
+      this._looping = false;
+      if (next) { this._resize(); this.reheat(.6); this._restart(); }
     }
 
     // Undefined values must never land in cfg: a vault config written by an older
@@ -379,9 +393,23 @@
 
     // ---------- render ----------
     _tick() {
-      // self-heal: if the canvas has a CSS size but a 0×0 backing store (e.g. it was
-      // created while hidden and ResizeObserver didn't fire on show), size it now.
-      if ((!this.canvas.width || !this.canvas.height) && this.canvas.clientWidth) { this._resize(); this.reheat(.6); }
+      // A pane with no layout size (hidden tab, collapsed split) must not draw.
+      // Drawing into it burns a core and pushes degenerate geometry at the GPU
+      // for a surface nobody can see.
+      if (!this._hasSize()) {
+        this._looping = false;
+        // idle poll rather than rAF, so a hidden pane costs ~4 wakeups/sec
+        if (this._shouldRun()) setTimeout(() => { this._looping = true; this._tick(); }, 250);
+        return;
+      }
+      // self-heal: CSS size but a stale backing store (created while hidden, or
+      // the display's DPR changed)
+      const want = Math.max(1, Math.round(this.canvas.clientWidth * (window.devicePixelRatio || 1)));
+      if (!this.canvas.width || !this.canvas.height || Math.abs(this.canvas.width - want) > 1) {
+        this._resize(); this.reheat(.6);
+      }
+      if (!this.dpr) this.dpr = window.devicePixelRatio || 1;
+
       this._animateCamera(); this._applyInertia(); this._step();
       const ctx = this.ctx, t = this.transform, W = this.canvas.clientWidth, H = this.canvas.clientHeight;
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -468,7 +496,8 @@
       ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
       this._drawMarquee(ctx);
       if (this.cfg.showMinimap) this._drawMinimap(ctx, W, H);
-      if (this._awake !== false) requestAnimationFrame(() => this._tick());
+      if (this._shouldRun()) { this._looping = true; requestAnimationFrame(() => this._tick()); }
+      else this._looping = false;
     }
 
     _drawBackground(ctx, W, H) {
@@ -635,7 +664,20 @@
     _emitPath(id) { this.h.onBreadcrumb && this.h.onBreadcrumb(this.getPath(id)); }
 
     // ---------- hit testing ----------
-    _resize() { const r = this.canvas.getBoundingClientRect(); if (!r.width || !r.height) return; this.dpr = window.devicePixelRatio || 1; this.canvas.width = r.width * this.dpr; this.canvas.height = r.height * this.dpr; }
+    // dpr must be set unconditionally: it used to be assigned only after the
+    // early-out, so a graph constructed while its container was display:none
+    // kept dpr === undefined and every later setTransform() got NaN.
+    _resize() {
+      this.dpr = window.devicePixelRatio || 1;
+      const r = this.canvas.getBoundingClientRect();
+      if (!r.width || !r.height) return false;
+      this.canvas.width = Math.max(1, Math.round(r.width * this.dpr));
+      this.canvas.height = Math.max(1, Math.round(r.height * this.dpr));
+      return true;
+    }
+    // Is this canvas actually laid out? A display:none pane has no size and must
+    // not be drawn into — there is nothing to fix up and nothing to show.
+    _hasSize() { return !!(this.canvas.clientWidth && this.canvas.clientHeight); }
     _toWorld(px, py) { const t = this.transform; return { x: (px - t.x) / t.k, y: (py - t.y) / t.k }; }
     _nodeAt(px, py) { const p = this._toWorld(px, py); return this._nodeAtWorld(p.x, p.y); }
     _nodeAtWorld(wx, wy, exclude) {

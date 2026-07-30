@@ -232,6 +232,24 @@ app.whenReady().then(async () => {
     truthy('folder gone from the vault', !fs.existsSync(rel('Doomed')));
   }
 
+  console.log('\nsettings must never lose the vault pointer:');
+  {
+    const settingsFile = path.join(USERDATA, 'synapse-settings.json');
+    const before = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    truthy('vault path is stored', !!before.vaultPath);
+
+    // A config write (the most frequent save) must not blank the vault.
+    await invoke('set-config', { accent: '#ff0000' });
+    const after = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    ok('vault path survives a config write', after.vaultPath, before.vaultPath);
+    ok('and the config change landed', after.config.accent, '#ff0000');
+
+    // Even if something blanks it in memory, the stored path wins.
+    await invoke('set-settings', { groupCreate: 'both' });
+    const after2 = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    ok('vault path survives a settings write', after2.vaultPath, before.vaultPath);
+  }
+
   console.log('\npath containment on the real handlers:');
   {
     for (const [ch, args] of [

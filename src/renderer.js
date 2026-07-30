@@ -69,6 +69,7 @@ const THEMES = {
 
   panes.a = new SynapseGraph(el('graph'), makeHandlers('a'));
   panes.b = new SynapseGraph(el('graph2'), makeHandlers('b'));
+  panes.b.setActive(false);          // split view is off until asked for
   graph = panes.a;
 
   wireCapture(); wireWorkspace(); wireSettings(); wirePalette(); wireAsk();
@@ -80,6 +81,9 @@ const THEMES = {
     if (d.state === 'available') toast('Update <b>' + d.version + '</b> found — downloading…');
     else if (d.state === 'downloading' && d.percent % 25 === 0) toast('Downloading update… ' + d.percent + '%');
     else if (d.state === 'ready') toast('Update <b>' + d.version + '</b> ready — restart to install');
+    else if (d.state === 'current') toast('You are on the latest version');
+    else if (d.state === 'checking') toast('Checking for updates…');
+    else if (d.state === 'error') toast('Update check failed — ' + escapeHtml(String(d.message || '')));
   });
   if (api.onMenuAction) api.onMenuAction(handleMenuAction);
   if (api.onVaultChanged) api.onVaultChanged(onVaultChanged);
@@ -231,6 +235,9 @@ function renderTabs() {
   el('splitTab').classList.toggle('active', !!splitTabId);
   el('paneB').classList.toggle('hidden', !splitTabId);
   document.querySelector('.panes').classList.toggle('split', !!splitTabId);
+  // an off-screen pane must stop rendering entirely, not spin invisibly
+  if (panes.b) panes.b.setActive(!!splitTabId);
+  if (panes.a) panes.a.setActive(true);
   el('paneA').classList.toggle('focused', activePane === 'a');
   el('paneB').classList.toggle('focused', activePane === 'b');
 }
@@ -1415,26 +1422,53 @@ function wireDropAndPaste() {
   window.addEventListener('dragenter', e => { if (hasFiles(e)) { e.preventDefault(); show(); } });
   window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
   window.addEventListener('dragleave', e => { if (hasFiles(e)) hide(); });
-  // While dragging over the canvas, light up whatever the files would land on.
+  // While dragging over the canvas, name whatever the files would land on.
+  // Hit-testing is O(nodes), and dragover fires continuously, so do at most one
+  // pass per animation frame.
+  let hoverPending = false, hoverPt = null;
   window.addEventListener('dragover', e => {
     if (!hasFiles(e)) return;
-    const t = dropTargetAt(e.clientX, e.clientY);
-    zone.querySelector('.dropzone-inner').textContent =
-      t.kind === 'note' ? 'Attach to "' + short(t.node.title) + '"'
-      : t.kind === 'tab' ? (t.tab.kind === 'ingest' ? 'Break down into ' + t.tab.title : 'Import into ' + t.tab.title)
-      : t.kind === 'folder' ? 'Import into ' + t.node.title
-      : (activeTab() && activeTab().kind === 'ingest') ? 'Break down into ' + activeTab().title
-      : 'Drop files to import';
+    hoverPt = { x: e.clientX, y: e.clientY };
+    if (hoverPending) return;
+    hoverPending = true;
+    requestAnimationFrame(() => {
+      hoverPending = false;
+      if (!hoverPt) return;
+      const label = zone.querySelector('.dropzone-inner');
+      if (!label) return;
+      let t;
+      try { t = dropTargetAt(hoverPt.x, hoverPt.y); } catch { t = { kind: 'none' }; }
+      label.textContent =
+        t.kind === 'note' ? 'Attach to "' + short(t.node.title) + '"'
+        : t.kind === 'tab' ? (t.tab.kind === 'ingest' ? 'Break down into ' + t.tab.title : 'Import into ' + t.tab.title)
+        : t.kind === 'folder' ? 'Import into ' + t.node.title
+        : (activeTab() && activeTab().kind === 'ingest') ? 'Break down into ' + activeTab().title
+        : 'Drop files to import';
+    });
   });
 
-  window.addEventListener('drop', async e => {
-    if (!hasFiles(e)) return;
-    e.preventDefault();
-    depth = 0; zone.classList.add('hidden');
+  // The drop itself is read in the preload (File objects must not cross the
+  // context bridge); we only get plain paths back.
+  window.addEventListener('drop', e => {
+    if (hasFiles(e)) e.preventDefault();
+    depth = 0; hoverPt = null;
+    zone.classList.add('hidden');
     clearTabDropHint();
-    const paths = api.pathsForFiles(e.dataTransfer.files);
-    if (!paths.length) { toast('Could not read those files.'); return; }
-    await routeDroppedFiles(paths, e.clientX, e.clientY);
+  });
+
+  if (api.onFilesDropped) api.onFilesDropped(info => {
+    depth = 0; zone.classList.add('hidden'); clearTabDropHint();
+    const paths = (info && info.paths) || [];
+    if (!paths.length) {
+      toast(info && info.count
+        ? 'Could not read those files — try importing them from the toolbar.'
+        : 'Nothing to import.');
+      return;
+    }
+    routeDroppedFiles(paths, info.x, info.y).catch(err => {
+      toast('Import failed — see the log for details.');
+      console.error('drop routing failed', err);
+    });
   });
 
   window.addEventListener('paste', async e => {

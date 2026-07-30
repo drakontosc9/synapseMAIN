@@ -10,6 +10,7 @@
     "test": "node test/classifier.test.js && node test/features.test.js && node test/safeio.test.js && node test/vault-async.test.js && node test/split.test.js",
     "test:ui": "electron test/ui-smoke.js",
     "test:ipc": "electron test/ipc-live.js",
+    "test:stress": "electron test/stress.js 2500",
     "dist": "electron-builder --publish never",
     "dist:win": "electron-builder --win --publish never"
   },

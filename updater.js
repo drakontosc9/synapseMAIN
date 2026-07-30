@@ -40,7 +40,30 @@ function initAutoUpdate(win) {
   setTimeout(check, 3000);
   setInterval(check, 6 * 60 * 60 * 1000);
 
+  instance = autoUpdater;
   return autoUpdater;
 }
 
-module.exports = { initAutoUpdate };
+// Held so the Help menu can trigger a check on demand.
+let instance = null;
+
+/**
+ * Manual "check now". Returns a short status string for the caller to surface,
+ * because in development there is no installed app to update.
+ */
+async function checkNow(win) {
+  const { app: electronApp } = require('electron');
+  if (!electronApp.isPackaged) {
+    return { ok: false, reason: 'dev', message: 'Updates only apply to the installed app, not to `npm start`.' };
+  }
+  if (!instance) return { ok: false, reason: 'unavailable', message: 'The updater is not available in this build.' };
+  try {
+    const r = await instance.checkForUpdates();
+    const version = r && r.updateInfo && r.updateInfo.version;
+    return { ok: true, version: version || null, message: version ? 'Found ' + version : 'Checking…' };
+  } catch (err) {
+    return { ok: false, reason: 'error', message: String((err && err.message) || err) };
+  }
+}
+
+module.exports = { initAutoUpdate, checkNow };
