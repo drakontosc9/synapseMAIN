@@ -78,9 +78,16 @@ const THEMES = {
   applyConfig(config);
   applySettingsToUI();
   if (api.onUpdateStatus) api.onUpdateStatus(d => {
-    if (d.state === 'available') toast('Update <b>' + d.version + '</b> found — downloading…');
-    else if (d.state === 'downloading' && d.percent % 25 === 0) toast('Downloading update… ' + d.percent + '%');
-    else if (d.state === 'ready') toast('Update <b>' + d.version + '</b> ready — restart to install');
+    if (d.state === 'available') { toast('Update <b>' + d.version + '</b> found — downloading…'); setUpdateStatus('Downloading <b>' + escapeHtml(String(d.version)) + '</b>…', 'new'); }
+    else if (d.state === 'downloading') {
+      setUpdateStatus('Downloading… <b>' + d.percent + '%</b>', 'new');
+      if (d.percent % 25 === 0) toast('Downloading update… ' + d.percent + '%');
+    }
+    else if (d.state === 'ready') {
+      toast('Update <b>' + d.version + '</b> ready — restart to install');
+      setUpdateStatus('Version <b>' + escapeHtml(String(d.version)) + '</b> is downloaded and ready.', 'ok');
+      el('installUpdateBtn').classList.remove('hidden');
+    }
     else if (d.state === 'current') toast('You are on the latest version');
     else if (d.state === 'checking') toast('Checking for updates…');
     else if (d.state === 'error') toast('Update check failed — ' + escapeHtml(String(d.message || '')));
@@ -428,6 +435,7 @@ function handleMenuAction(action) {
     case 'recents':       toggleRecents(); break;
     case 'cycle-theme':   cycleTheme(); break;
     case 'open-help':     openSettings(); selectSettingsTab('help'); break;
+    case 'check-updates': openSettings(); selectSettingsTab('help'); checkForUpdates(); break;
     case 'new-tab': {
       const node = graph.map.get(graph.opened);
       if (node) openTabForNode(node); else toast('Open a note or folder first, or drag a bubble onto the tab bar.');
@@ -1715,6 +1723,7 @@ function wireSettings() {
     const r = await api.showLog();
     if (!r || !r.ok) toast('No log file yet.');
   });
+  wireUpdates();
 
   // theme chips
   const tr = el('themeRow');
@@ -1760,6 +1769,90 @@ function renderFolderColors() {
     box.appendChild(row);
   }
 }
+// ---------- updates ----------
+function setUpdateStatus(html, kind) {
+  const s = el('updateStatus');
+  if (!s) return;
+  s.innerHTML = html;
+  s.className = 'update-status' + (kind ? ' ' + kind : '');
+}
+function relDate(iso) {
+  const t = Date.parse(iso || '');
+  if (!t) return '';
+  const days = Math.floor((Date.now() - t) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 30) return days + ' days ago';
+  return new Date(t).toLocaleDateString();
+}
+
+async function checkForUpdates() {
+  const btn = el('checkUpdatesBtn');
+  btn.disabled = true;
+  el('installUpdateBtn').classList.add('hidden');
+  el('openReleaseBtn').classList.add('hidden');
+  el('updateNotes').classList.add('hidden');
+  setUpdateStatus('Checking GitHub…');
+
+  let r;
+  try { r = await api.checkUpdates(); }
+  catch (err) { r = { ok: false, error: (err && err.message) || 'Check failed.' }; }
+  btn.disabled = false;
+
+  if (!r || !r.ok) {
+    setUpdateStatus('Could not check: ' + escapeHtml((r && r.error) || 'unknown error'), 'err');
+    return;
+  }
+  if (r.status === 'none') {
+    setUpdateStatus('No releases have been published yet. You are running <b>' + escapeHtml(r.current) + '</b>.');
+    return;
+  }
+
+  el('openReleaseBtn').classList.remove('hidden');
+  if (r.notes) {
+    const n = el('updateNotes');
+    n.textContent = r.notes;
+    n.classList.remove('hidden');
+  }
+
+  if (r.status === 'current') {
+    setUpdateStatus('You are up to date — <b>' + escapeHtml(r.current) + '</b> is the latest release.', 'ok');
+    return;
+  }
+
+  // an update exists
+  const head = 'Version <b>' + escapeHtml(r.latest) + '</b> is available (released ' +
+    escapeHtml(relDate(r.published)) + '). You have <b>' + escapeHtml(r.current) + '</b>.';
+
+  if (r.canAutoInstall) {
+    setUpdateStatus(head + '<br>Downloading it now — you will be asked to restart when it is ready.', 'new');
+    return;
+  }
+  if (!r.packaged) {
+    setUpdateStatus(head + '<br>You are running from source, so there is nothing to auto-update: ' +
+      '<b>git pull</b> and restart.', 'new');
+    return;
+  }
+  if (!r.hasFeed) {
+    setUpdateStatus(head + '<br>That release has no <b>latest.yml</b> attached, so it cannot install itself. ' +
+      'Download the installer from the release page.', 'new');
+    return;
+  }
+  setUpdateStatus(head + '<br>Download it from the release page.', 'new');
+}
+
+function wireUpdates() {
+  el('checkUpdatesBtn').addEventListener('click', checkForUpdates);
+  el('openReleaseBtn').addEventListener('click', async () => {
+    const r = await api.openRelease();
+    if (!r || !r.ok) toast('Could not open the release page.');
+  });
+  el('installUpdateBtn').addEventListener('click', async () => {
+    const r = await api.installUpdate();
+    if (!r || !r.ok) toast((r && r.error) || 'Could not install the update.');
+  });
+}
+
 async function applyShortcut() {
   const accel = el('quickShortcut').value.trim() || 'Control+Shift+Space';
   const enabled = el('quickCaptureEnabled').checked;

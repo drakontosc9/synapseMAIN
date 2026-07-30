@@ -254,6 +254,17 @@
             • <b>Ctrl+Shift+Space</b> (configurable) captures a thought from anywhere in Windows.
           </div>
           <div class="setting">
+            <div class="setting-label">Updates</div>
+            <div class="setting-desc">Compares this build against the newest release on GitHub.</div>
+            <div class="inline-row">
+              <button id="checkUpdatesBtn" class="primary small">Check for updates</button>
+              <button id="installUpdateBtn" class="primary small hidden">Restart &amp; install</button>
+              <button id="openReleaseBtn" class="ghost small hidden">View release</button>
+            </div>
+            <div id="updateStatus" class="update-status"></div>
+            <pre id="updateNotes" class="update-notes hidden"></pre>
+          </div>
+          <div class="setting">
             <div class="setting-label">About</div>
             <div id="aboutBox" class="setting-desc"></div>
             <button id="openLogBtn" class="ghost small">Show log file</button>

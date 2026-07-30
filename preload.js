@@ -113,6 +113,9 @@ contextBridge.exposeInMainWorld('synapse', {
   learnFiling:    (text, folder) => ipcRenderer.invoke('learn-filing', text, folder),
   saveImage:      (dataUrl)      => ipcRenderer.invoke('save-image', dataUrl),
   showLog:        ()             => ipcRenderer.invoke('show-log'),
+  checkUpdates:   ()             => ipcRenderer.invoke('check-updates'),
+  openRelease:    ()             => ipcRenderer.invoke('open-release'),
+  installUpdate:  ()             => ipcRenderer.invoke('install-update'),
 
   // quick capture window
   quickHide:      ()             => ipcRenderer.invoke('quick-hide'),

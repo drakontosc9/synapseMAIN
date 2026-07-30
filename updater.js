@@ -66,4 +66,10 @@ async function checkNow(win) {
   }
 }
 
-module.exports = { initAutoUpdate, checkNow };
+/** Restart into the downloaded update. No-op if nothing is staged. */
+function quitAndInstall() {
+  if (!instance) throw new Error('The updater is not running.');
+  instance.quitAndInstall();
+}
+
+module.exports = { initAutoUpdate, checkNow, quitAndInstall };

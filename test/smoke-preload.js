@@ -8,6 +8,7 @@ const rec = (name, result) => (...args) => { calls.push({ name, args }); return 
 // the real preload reads dropped files itself and hands back plain paths;
 // the test drives that callback directly
 let dropCb = null;
+let updateCb = null;
 
 contextBridge.exposeInMainWorld('synapse', {
   getVault: rec('getVault', 'C:/tmp/vault'),
@@ -63,9 +64,18 @@ contextBridge.exposeInMainWorld('synapse', {
   learnFiling: rec('learnFiling', { ok: true, added: ['gateway'] }),
   saveImage: rec('saveImage', { ok: true }),
   showLog: rec('showLog', { ok: true }),
+  checkUpdates: rec('checkUpdates', {
+    ok: true, current: '0.3.2', packaged: false, latest: '0.4.0', status: 'available',
+    url: 'https://github.com/drakontosc9/synapseMAIN/releases/tag/v0.4.0',
+    published: new Date(Date.now() - 2 * 86400000).toISOString(),
+    notes: 'Adds the lens engine.', hasInstaller: true, hasFeed: true, canAutoInstall: false
+  }),
+  openRelease: rec('openRelease', { ok: true }),
+  installUpdate: rec('installUpdate', { ok: true }),
   quickHide: rec('quickHide', true),
   quickOpenMain: rec('quickOpenMain', true),
-  onUpdateStatus: () => () => {},
+  // let the test push update-status events at the renderer
+  onUpdateStatus: (cb) => { updateCb = (typeof cb === 'function') ? cb : null; return () => {}; },
   onMenuAction: () => () => {},
   onVaultChanged: () => () => {},
   onShortcutFailed: () => () => {},
@@ -75,5 +85,6 @@ contextBridge.exposeInMainWorld('synapse', {
   __calls: () => calls.slice(),
   __reset: () => { calls.length = 0; },
   __hasDropCb: () => typeof dropCb === 'function',
-  __fireDrop: (info) => { if (dropCb) dropCb(info); }
+  __fireDrop: (info) => { if (dropCb) dropCb(info); },
+  __fireUpdate: (info) => { if (updateCb) updateCb(info); }
 });

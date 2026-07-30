@@ -541,6 +541,46 @@ app.whenReady().then(async () => {
   ok('breakdown survives', await js('!!tabs.find(function(t){return t.kind==="ingest"})'), true);
   ok('active falls back to a surviving tab', await js('!!tabs.find(function(t){return t.id===activeTabId})'), true);
 
+  console.log('\ncheck for updates button:');
+  await js('window.synapse.__reset()');
+  await js('openSettings(); selectSettingsTab("help"); 0');
+  await wait(150);
+  ok('button exists on the help panel', await js('!!document.getElementById("checkUpdatesBtn")'), true);
+  await js('document.getElementById("checkUpdatesBtn").click()');
+  await wait(400);
+  ok('it asked main to check', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="checkUpdates"}).length'), 1);
+  ok('an available update is announced', await js(
+    'document.getElementById("updateStatus").textContent.indexOf("0.4.0") >= 0'), true);
+  ok('it says what you are running', await js(
+    'document.getElementById("updateStatus").textContent.indexOf("0.3.2") >= 0'), true);
+  ok('release age shown', await js(
+    'document.getElementById("updateStatus").textContent.indexOf("2 days ago") >= 0'), true);
+  ok('source builds are told to git pull', await js(
+    'document.getElementById("updateStatus").textContent.indexOf("git pull") >= 0'), true);
+  ok('release notes rendered', await js(
+    'document.getElementById("updateNotes").textContent'), 'Adds the lens engine.');
+  ok('view-release button revealed', await js(
+    '!document.getElementById("openReleaseBtn").classList.contains("hidden")'), true);
+  ok('install button stays hidden until a download is ready', await js(
+    'document.getElementById("installUpdateBtn").classList.contains("hidden")'), true);
+
+  await js('document.getElementById("openReleaseBtn").click()');
+  await wait(200);
+  ok('view release opens it via main', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="openRelease"}).length'), 1);
+
+  // a downloaded update reveals the restart button
+  await js('window.synapse.__fireUpdate({state:"ready",version:"0.4.0"}); 0');
+  await wait(200);
+  ok('restart button appears when ready', await js(
+    '!document.getElementById("installUpdateBtn").classList.contains("hidden")'), true);
+  await js('document.getElementById("installUpdateBtn").click()');
+  await wait(200);
+  ok('restart asks main to install', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="installUpdate"}).length'), 1);
+  await js('closeSettings(); 0');
+
   console.log('\nquick capture window:');
   const qwin = new BrowserWindow({
     show: false,

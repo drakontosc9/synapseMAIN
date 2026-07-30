@@ -214,6 +214,23 @@ that route to it. Higher keyword/tag matches win; an explicit `#tag` counts for 
 loose keyword. Add folders, add keywords, reorder freely — changes take effect on the next
 captured thought.
 
+## Checking for updates
+
+**Settings → How to use → Check for updates** (also Help → Check for updates…) asks GitHub
+for the newest Release and compares it against the running build. It answers honestly in
+every situation:
+
+| Situation | What it says |
+|---|---|
+| Already newest | *You are up to date — 0.3.2 is the latest release.* |
+| Newer release, installed app | Downloads it, shows progress, then offers **Restart & install** |
+| Newer release, running from source | *You are running from source — `git pull` and restart* |
+| Release has no `latest.yml` | Says it cannot self-install, points at the release page |
+| No releases yet / offline / rate-limited | Says exactly that |
+
+Release notes are shown inline, and **View release** opens the GitHub page. The check also
+runs automatically 3 seconds after launch and every 6 hours.
+
 ## Shipping an update to yourself
 
 The installed app updates from **GitHub Releases**, not from git. Pushing a commit changes

@@ -232,6 +232,28 @@ app.whenReady().then(async () => {
     truthy('folder gone from the vault', !fs.existsSync(rel('Doomed')));
   }
 
+  console.log('\ncheck-updates (hits the real GitHub API):');
+  {
+    const r = await invoke('check-updates');
+    truthy('responds', !!r);
+    ok('reports the running version', r.current, app.getVersion());
+    ok('knows it is not a packaged build', r.packaged, false);
+    if (r.ok) {
+      truthy('status is one of none/current/available',
+        ['none', 'current', 'available'].indexOf(r.status) >= 0);
+      if (r.status !== 'none') {
+        truthy('returns a latest version string', typeof r.latest === 'string' && r.latest.length > 0);
+        truthy('returns a release url', /^https:\/\/github\.com\//.test(r.url || ''));
+        ok('never auto-installs from a dev build', r.canAutoInstall, false);
+      }
+      console.log('      (live: running ' + r.current + ', latest ' + (r.latest || 'none') + ', status ' + r.status + ')');
+    } else {
+      // offline or rate-limited is a legitimate outcome, but it must be reported
+      truthy('failure carries a message', typeof r.error === 'string' && r.error.length > 0);
+      console.log('      (live check unavailable: ' + r.error + ')');
+    }
+  }
+
   console.log('\nsettings must never lose the vault pointer:');
   {
     const settingsFile = path.join(USERDATA, 'synapse-settings.json');

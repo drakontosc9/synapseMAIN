@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node test/classifier.test.js && node test/features.test.js && node test/safeio.test.js && node test/vault-async.test.js && node test/split.test.js",
+    "test": "node test/classifier.test.js && node test/features.test.js && node test/safeio.test.js && node test/vault-async.test.js && node test/split.test.js && node test/version.test.js",
     "test:ui": "electron test/ui-smoke.js",
     "test:ipc": "electron test/ipc-live.js",
     "test:stress": "electron test/stress.js 2500",

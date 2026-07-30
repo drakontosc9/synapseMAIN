@@ -388,16 +388,9 @@ function buildMenu() {
       label: '&Help',
       submenu: [
         { label: 'How to use Synapse', click: send('open-help') },
-        { label: 'Check for updates…', click: async () => {
-          let r = { message: 'The updater is not available.' };
-          try { r = await require('./updater').checkNow(mainWindow); } catch (err) { log.warn('update check failed: ', err); }
-          log.info('manual update check: ' + r.message);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('update-status',
-              r.ok ? { state: r.version ? 'available' : 'checking', version: r.version }
-                   : { state: 'error', message: r.message });
-          }
-        } },
+        // opens Settings on the same panel as the button, so there is one place
+        // that answers "am I up to date?"
+        { label: 'Check for updates…', click: send('check-updates') },
         { label: 'Open log file', click: () => { const f = log.file(); if (f) shell.showItemInFolder(f); } },
         { type: 'separator' },
         { label: 'About Synapse ' + app.getVersion(), click: () => {
@@ -1197,6 +1190,120 @@ handle('breakdown-file', (_e, paths, folderId) => {
     }
   }
   return { ok: true, docs, skipped, folder: folder || '' };
+});
+
+// ---------- update checking ----------
+// electron-updater only works inside a packaged app. To give an honest answer
+// in both modes we ask the GitHub Releases API ourselves and compare versions;
+// when we *are* packaged, we then hand off to electron-updater to do the work.
+
+const https = require('https');
+const versions = require('./version');
+
+let lastRelease = null;   // remembered so "View release" needs no URL from the renderer
+
+function repoInfo() {
+  try {
+    const pkg = require('./package.json');
+    const pub = (pkg.build && pkg.build.publish && pkg.build.publish[0]) || {};
+    if (pub.provider === 'github' && pub.owner && pub.repo) return { owner: pub.owner, repo: pub.repo };
+  } catch (err) { log.warn('could not read publish config: ', err); }
+  return null;
+}
+
+function fetchJson(url, redirects) {
+  const hops = redirects || 0;
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: { 'User-Agent': 'Synapse-Updater', 'Accept': 'application/vnd.github+json' },
+      timeout: 12000
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && hops < 3) {
+        res.resume();
+        return resolve(fetchJson(res.headers.location, hops + 1));
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        body += c;
+        if (body.length > 2 * 1024 * 1024) { req.destroy(new Error('response too large')); }
+      });
+      res.on('end', () => {
+        if (res.statusCode === 404) return resolve({ __none: true });
+        if (res.statusCode === 403) return reject(new Error('GitHub rate limit reached — try again in a few minutes.'));
+        if (res.statusCode !== 200) return reject(new Error('GitHub returned ' + res.statusCode));
+        try { resolve(JSON.parse(body)); }
+        catch { reject(new Error('Unreadable response from GitHub.')); }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('Timed out contacting GitHub.')));
+    req.on('error', reject);
+  });
+}
+
+handle('check-updates', async () => {
+  const current = app.getVersion();
+  const packaged = app.isPackaged;
+  const repo = repoInfo();
+  if (!repo) return { ok: false, current, packaged, error: 'No GitHub repository is configured in package.json.' };
+
+  let rel;
+  try {
+    rel = await fetchJson('https://api.github.com/repos/' + repo.owner + '/' + repo.repo + '/releases/latest');
+  } catch (err) {
+    log.warn('update check failed: ', err);
+    return { ok: false, current, packaged, error: String(err.message || err) };
+  }
+
+  if (rel.__none) {
+    log.info('update check: no releases published');
+    return { ok: true, current, packaged, status: 'none', latest: null };
+  }
+
+  const latest = versions.clean(rel.tag_name || rel.name || '');
+  const newer = versions.isNewer(latest, current);
+  const assets = rel.assets || [];
+  const hasInstaller = assets.some(a => /\.exe$/i.test(a.name || ''));
+  const hasFeed = assets.some(a => (a.name || '').toLowerCase() === 'latest.yml');
+
+  lastRelease = { url: rel.html_url, version: latest };
+  log.info('update check: running ' + current + ', latest release ' + latest + (newer ? ' (newer)' : ' (up to date)'));
+
+  const result = {
+    ok: true, current, packaged, latest,
+    status: newer ? 'available' : 'current',
+    url: rel.html_url,
+    published: rel.published_at,
+    notes: String(rel.body || '').slice(0, 800),
+    hasInstaller, hasFeed,
+    // an update can only install itself when all three line up
+    canAutoInstall: !!(newer && packaged && hasFeed)
+  };
+
+  if (result.canAutoInstall) {
+    // autoDownload is on, so this kicks off the download; progress arrives on
+    // the existing update-status channel.
+    try { await require('./updater').checkNow(mainWindow); }
+    catch (err) { log.warn('handing off to electron-updater failed: ', err); }
+  }
+  return result;
+});
+
+handle('open-release', () => {
+  if (!lastRelease || !lastRelease.url) return { ok: false };
+  return openExternal(lastRelease.url) ? { ok: true } : { ok: false };
+});
+
+handle('install-update', () => {
+  if (!app.isPackaged) return { ok: false, error: 'Only the installed app can restart into an update.' };
+  try {
+    isQuitting = true;
+    require('./updater').quitAndInstall();
+    return { ok: true };
+  } catch (err) {
+    log.error('quitAndInstall failed: ', err);
+    return { ok: false, error: String(err.message || err) };
+  }
 });
 
 // Pick arbitrary files (the import dialog is deliberately narrow; this is not).
