@@ -7,6 +7,46 @@ let settings = { groupCreate: 'both' };
 let config = {};
 let appInfo = {};
 let lastScan = null;
+let panes = { a: null, b: null };
+let activePane = 'a';
+let tabs = [];
+let activeTabId = null, splitTabId = null;
+
+// Every pane gets the same handlers, but each knows which pane it belongs to so
+// clicking into a pane makes it the focused one.
+function makeHandlers(pane) {
+  const focus = () => { if (activePane !== pane) focusPane(pane); };
+  return {
+    onNodeClick: (node) => { focus(); openNote(node); },
+    onBackgroundClick: () => { focus(); closePanel(); hideCtx(); hideSearch(); },
+    onPickup: () => { focus(); showHint('Carrying a note — drop it on another to make it a <b>child</b>. Release on empty space to cancel.'); },
+    onMakeChild: (a, b) => { focus(); makeChild(a, b); },
+    onMakeLink: (a, b) => { focus(); makeLink(a, b); },
+    onDropInFolder: (a, b) => { focus(); dropInFolder(a, b); },
+    onDropOutside: (id, x, y) => { focus(); return onDropOutside(id, x, y); },
+    onDragOutside: onDragOverTabs,
+    onSelectionChange: (ids) => { focus(); updateSelbar(ids); },
+    onContextMenu: (info) => { focus(); showCtx(info); },
+    onBreadcrumb: (path) => { if (pane === activePane) renderBreadcrumb(path); },
+    onFocusGraph: (node) => { focus(); onFocusGraph(node); },
+    onHover: showHoverCard,
+    onHoverEnd: hideHoverCard
+  };
+}
+
+// The graph config derived from the current theme + settings, shared by panes.
+function graphConfig() {
+  const th = THEMES[config.theme] || THEMES.midnight;
+  return {
+    background: config.background, gridColor: th.grid, gridSpacing: config.gridSpacing,
+    nodeScale: config.nodeScale, labelScale: config.labelScale, folderBase: config.folderBase, folderGrow: config.folderGrow,
+    threshold: config.threshold, ramp: config.ramp, repulsion: config.repulsion, spring: config.spring,
+    linkTension: config.linkTension, packing: config.packing, animSpeed: config.animSpeed, inertia: config.inertia,
+    longPressMs: config.longPressMs, ripples: config.ripples, showMinimap: config.showMinimap,
+    showSuggestions: config.showSuggestions, reveal: config.reveal || 'fade',
+    edgeStyle: config.edgeStyle || 'curved', folderColors: config.folderColors || {}
+  };
+}
 let searchExact = false;
 let undoStack = [];
 let audioCtx = null;
@@ -27,23 +67,30 @@ const THEMES = {
   try { settings = await api.getSettings() || settings; } catch {}
   try { config = await api.getConfig() || {}; } catch {}
 
-  graph = new SynapseGraph(el('graph'), {
-    onNodeClick: openNote,
-    onBackgroundClick: () => { closePanel(); hideCtx(); hideSearch(); },
-    onPickup: () => showHint('Carrying a note — drop it on another to make it a <b>child</b>. Release on empty space to cancel.'),
-    onMakeChild: makeChild, onMakeLink: makeLink,
-    onSelectionChange: updateSelbar, onContextMenu: showCtx,
-    onBreadcrumb: renderBreadcrumb, onFocusGraph: onFocusGraph,
-    onHover: showHoverCard, onHoverEnd: hideHoverCard
-  });
+  panes.a = new SynapseGraph(el('graph'), makeHandlers('a'));
+  panes.b = new SynapseGraph(el('graph2'), makeHandlers('b'));
+  panes.b.setActive(false);          // split view is off until asked for
+  graph = panes.a;
 
   wireCapture(); wireWorkspace(); wireSettings(); wirePalette(); wireAsk();
+  wireSpawn(); wireLens(); wireDropAndPaste(); wireTabs();
+  loadTabs();
   applyConfig(config);
   applySettingsToUI();
   if (api.onUpdateStatus) api.onUpdateStatus(d => {
-    if (d.state === 'available') toast('Update <b>' + d.version + '</b> found — downloading…');
-    else if (d.state === 'downloading' && d.percent % 25 === 0) toast('Downloading update… ' + d.percent + '%');
-    else if (d.state === 'ready') toast('Update <b>' + d.version + '</b> ready — restart to install');
+    if (d.state === 'available') { toast('Update <b>' + d.version + '</b> found — downloading…'); setUpdateStatus('Downloading <b>' + escapeHtml(String(d.version)) + '</b>…', 'new'); }
+    else if (d.state === 'downloading') {
+      setUpdateStatus('Downloading… <b>' + d.percent + '%</b>', 'new');
+      if (d.percent % 25 === 0) toast('Downloading update… ' + d.percent + '%');
+    }
+    else if (d.state === 'ready') {
+      toast('Update <b>' + d.version + '</b> ready — restart to install');
+      setUpdateStatus('Version <b>' + escapeHtml(String(d.version)) + '</b> is downloaded and ready.', 'ok');
+      el('installUpdateBtn').classList.remove('hidden');
+    }
+    else if (d.state === 'current') toast('You are on the latest version');
+    else if (d.state === 'checking') toast('Checking for updates…');
+    else if (d.state === 'error') toast('Update check failed — ' + escapeHtml(String(d.message || '')));
   });
   if (api.onMenuAction) api.onMenuAction(handleMenuAction);
   if (api.onVaultChanged) api.onVaultChanged(onVaultChanged);
@@ -54,7 +101,323 @@ const THEMES = {
   renderAbout();
 
   await refresh();
+  renderTabs();
+  if (splitTabId) applyTab(tabById(splitTabId), 'b');
+
+  // Smart startup: if the vault already has thoughts in it, the splash screen is
+  // just a door you have to open every launch. Go straight to the workspace.
+  try {
+    const v = await api.vaultHasNotes();
+    if (v && v.hasNotes) showWorkspace(true);
+  } catch {}
 })();
+
+// ============================================================================
+// WORKSPACE TABS / MULTI-GRAPH ENGINE
+// ----------------------------------------------------------------------------
+// A tab is a *view* over the one vault: a scope (a folder subtree, or the whole
+// vault for the pinned Master tab) plus its own camera and lens. Only the panes
+// on screen own a SynapseGraph instance, so background tabs cost nothing —
+// they are literally not rendering.
+// ============================================================================
+
+const MASTER_TAB = { id: 'master', title: 'Master', scopeId: '', pinned: true, kind: 'scope' };
+// The Breakdown tab is a drop target with an opinion: anything you drop while
+// it is active gets torn into its important parts as linked child notes.
+const INGEST_TAB = { id: 'ingest', title: 'Breakdown', scopeId: 'Breakdown', pinned: true, kind: 'ingest' };
+
+function defaultTabs() { return [Object.assign({}, MASTER_TAB), Object.assign({}, INGEST_TAB)]; }
+
+function tabById(id) { return tabs.find(t => t.id === id) || null; }
+function activeTab() { return tabById(activeTabId) || tabs[0]; }
+function paneOf(tabId) {
+  if (tabId === activeTabId) return 'a';
+  if (tabId === splitTabId) return 'b';
+  return null;
+}
+function graphOf(pane) { return pane === 'b' ? panes.b : panes.a; }
+
+// Restrict a full scan to one folder subtree. Everything outside the scope is
+// dropped, and the scope folder is re-parented onto the synthetic vault root so
+// the semantic-zoom maths still works unchanged.
+function scopeData(data, scopeId) {
+  if (!data) return { nodes: [], links: [], folders: [], suggestions: [] };
+  if (!scopeId) return data;
+
+  const inScope = new Set();
+  const byId = new Map(data.nodes.map(n => [n.id, n]));
+  if (!byId.has(scopeId)) return { nodes: [], links: [], folders: [], suggestions: [], missing: true };
+
+  for (const n of data.nodes) {
+    if (n.type === 'root') continue;
+    let cur = n, hops = 0;
+    while (cur && hops++ < 40) {
+      if (cur.id === scopeId) { inScope.add(n.id); break; }
+      cur = cur.containerId ? byId.get(cur.containerId) : null;
+    }
+  }
+
+  const nodes = data.nodes
+    .filter(n => n.type === 'root' || inScope.has(n.id))
+    .map(n => (n.id === scopeId ? Object.assign({}, n, { containerId: '__root__' }) : n));
+
+  const noteCount = nodes.filter(n => n.type === 'note').length;
+  const links = data.links.filter(l => inScope.has(l.source) && inScope.has(l.target));
+  const suggestions = (data.suggestions || []).filter(s => inScope.has(s.a) && inScope.has(s.b));
+  const folders = [...new Set(nodes.filter(n => n.type === 'note').map(n => n.folder))].sort();
+
+  return {
+    nodes: nodes.map(n => n.type === 'root' ? Object.assign({}, n, { noteCount }) : n),
+    links, folders, suggestions, busyTags: data.busyTags || []
+  };
+}
+
+// Push a tab's scoped data + camera into a pane's graph instance.
+function applyTab(tab, pane) {
+  const g = graphOf(pane);
+  if (!g || !tab) return;
+  const scoped = scopeData(lastScan, tab.scopeId);
+  g.setData(scoped);
+  g.setConfig(graphConfig());
+  g.setLens(tab.lens && tab.lens !== 'free' ? tab.lens : null);
+  if (tab.cam && Number.isFinite(tab.cam.k)) {
+    g.transform.x = tab.cam.x; g.transform.y = tab.cam.y; g.transform.k = tab.cam.k;
+    g.reheat(.5);
+  } else {
+    setTimeout(() => g.fit(), 60);
+  }
+  const badge = el(pane === 'b' ? 'badgeB' : 'badgeA');
+  if (badge) badge.textContent = tab.title;
+}
+
+function rememberCam(tabId) {
+  const pane = paneOf(tabId), tab = tabById(tabId);
+  const g = pane && graphOf(pane);
+  if (!g || !tab) return;
+  tab.cam = { x: g.transform.x, y: g.transform.y, k: g.transform.k };
+  tab.lens = g.lens || 'free';
+}
+
+function renderTabs() {
+  const row = el('tabs');
+  row.innerHTML = '';
+  for (const t of tabs) {
+    const b = document.createElement('button');
+    b.className = 'wtab' + (t.id === activeTabId ? ' active' : '') + (t.id === splitTabId ? ' split' : '');
+    b.dataset.tab = t.id;
+    b.title = t.scopeId ? 'Scoped to ' + t.scopeId : 'The whole vault';
+
+    if (t.kind === 'ingest') b.classList.add('ingest');
+
+    const dot = document.createElement('span');
+    dot.className = 'wtab-dot';
+    dot.style.background = t.kind === 'ingest' ? '#f0a35e'
+      : t.scopeId ? graphOf('a').colorFor(t.scopeId.split('/').pop()) : 'var(--accent)';
+    b.appendChild(dot);
+
+    const label = document.createElement('span');
+    label.className = 'wtab-title'; label.textContent = t.title;
+    b.appendChild(label);
+
+    if (t.kind === 'ingest') {
+      b.title = 'Drop a file here (or while this tab is open) to break it into its important parts';
+      const i = document.createElement('span');
+      i.className = 'wtab-pin'; i.textContent = '⇩';
+      b.appendChild(i);
+    } else if (t.pinned) {
+      const p = document.createElement('span');
+      p.className = 'wtab-pin'; p.textContent = '📌'; p.title = 'Always available';
+      b.appendChild(p);
+    } else {
+      const x = document.createElement('span');
+      x.className = 'wtab-close'; x.textContent = '✕';
+      x.addEventListener('click', ev => { ev.stopPropagation(); closeTab(t.id); });
+      b.appendChild(x);
+    }
+
+    b.addEventListener('click', () => activateTab(t.id));
+    b.addEventListener('auxclick', ev => { if (ev.button === 1 && !t.pinned) { ev.preventDefault(); closeTab(t.id); } });
+    row.appendChild(b);
+  }
+  el('splitTab').classList.toggle('active', !!splitTabId);
+  el('paneB').classList.toggle('hidden', !splitTabId);
+  document.querySelector('.panes').classList.toggle('split', !!splitTabId);
+  // an off-screen pane must stop rendering entirely, not spin invisibly
+  if (panes.b) panes.b.setActive(!!splitTabId);
+  if (panes.a) panes.a.setActive(true);
+  el('paneA').classList.toggle('focused', activePane === 'a');
+  el('paneB').classList.toggle('focused', activePane === 'b');
+}
+
+function activateTab(id, pane) {
+  const t = tabById(id); if (!t) return;
+  const target = pane || 'a';
+  if (target === 'a') {
+    if (id === splitTabId) { splitTabId = activeTabId; rememberCam(activeTabId); }  // swap panes
+    else rememberCam(activeTabId);
+    activeTabId = id;
+    applyTab(t, 'a');
+    if (splitTabId) applyTab(tabById(splitTabId), 'b');
+    focusPane('a');
+  } else {
+    rememberCam(splitTabId);
+    splitTabId = id;
+    applyTab(t, 'b');
+    focusPane('b');
+  }
+  renderTabs();
+  saveTabs();
+}
+
+function focusPane(pane) {
+  activePane = pane;
+  graph = graphOf(pane);
+  el('paneA').classList.toggle('focused', pane === 'a');
+  el('paneB').classList.toggle('focused', pane === 'b');
+}
+
+function openTabForNode(node, opts) {
+  if (!node) return null;
+  const scopeId = node.type === 'folder' ? node.id : node.containerId;
+  if (!scopeId) { toast('That lives at the top level — the Master tab already shows it.'); return null; }
+  const existing = tabs.find(t => t.scopeId === scopeId);
+  if (existing) { activateTab(existing.id, opts && opts.pane); return existing; }
+  const tab = {
+    id: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    title: scopeId.split('/').pop(),
+    scopeId,
+    lens: 'free'
+  };
+  tabs.push(tab);
+  activateTab(tab.id, opts && opts.pane);
+  toast('Opened <b>' + short(tab.title) + '</b> in its own tab');
+  return tab;
+}
+
+function closeTab(id) {
+  const t = tabById(id);
+  if (!t || t.pinned) return;
+  tabs = tabs.filter(x => x.id !== id);
+  if (splitTabId === id) splitTabId = null;
+  if (activeTabId === id) activeTabId = (splitTabId && splitTabId !== id) ? splitTabId : tabs[0].id;
+  if (splitTabId === activeTabId) splitTabId = null;
+  applyTab(activeTab(), 'a');
+  if (splitTabId) applyTab(tabById(splitTabId), 'b'); else focusPane('a');
+  renderTabs();
+  saveTabs();
+}
+
+function toggleSplit() {
+  if (splitTabId) {
+    rememberCam(splitTabId);
+    splitTabId = null;
+    focusPane('a');
+    renderTabs(); saveTabs();
+    setTimeout(() => panes.a.fit(), 80);
+    return;
+  }
+  const other = tabs.find(t => t.id !== activeTabId);
+  if (!other) { toast('Open another tab first — split compares two maps.'); return; }
+  splitTabId = other.id;
+  applyTab(other, 'b');
+  renderTabs(); saveTabs();
+  setTimeout(() => { panes.a.fit(); panes.b.fit(); }, 90);
+  toast('Split view — <b>' + short(activeTab().title) + '</b> vs <b>' + short(other.title) + '</b>');
+}
+
+// Cross-tab routing: dropping a node on a tab header files it into that tab's
+// folder, moving the idea between maps in one gesture.
+function tabAtPoint(clientX, clientY) {
+  const bar = el('tabbar');
+  const r = bar.getBoundingClientRect();
+  if (clientY < r.top || clientY > r.bottom) return undefined;   // not over the bar at all
+  for (const b of bar.querySelectorAll('.wtab')) {
+    const br = b.getBoundingClientRect();
+    if (clientX >= br.left && clientX <= br.right) return tabById(b.dataset.tab);
+  }
+  return null;   // over the bar, but not on a tab => spawn a new one
+}
+
+// Must answer the graph synchronously — it needs to know *right now* whether the
+// drop was consumed. Any actual work happens after.
+function onDropOutside(nodeId, clientX, clientY) {
+  const hit = tabAtPoint(clientX, clientY);
+  if (hit === undefined) return false;            // not over the tab bar: not ours
+  clearTabDropHint();
+  routeDroppedNode(nodeId, hit);
+  return true;
+}
+
+async function routeDroppedNode(nodeId, hit) {
+  const node = graph.map.get(nodeId);
+  if (!node) return;
+
+  if (hit === null) { openTabForNode(node); return; }   // empty tab-bar space
+  if (node.type !== 'note') { toast('Only notes can be routed between tabs.'); return; }
+  if (hit.scopeId === (node.containerId || '')) { toast('Already in <b>' + short(hit.title) + '</b>'); return; }
+
+  const from = parentDirOf(nodeId);
+  const res = await api.moveNote(nodeId, hit.scopeId);
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not route that note.'); return; }
+  pushUndo('routing of ' + short(node.title), async () => { await api.moveNote(res.to, from); await refresh(); });
+  await refresh();
+  toast('<b>' + short(node.title) + '</b> routed to <b>' + short(hit.title) + '</b>');
+}
+
+function onDragOverTabs(clientX, clientY) {
+  const hit = tabAtPoint(clientX, clientY);
+  clearTabDropHint();
+  if (hit === undefined) return;
+  el('tabbar').classList.add('dropping');
+  if (hit) {
+    const b = el('tabs').querySelector('[data-tab="' + hit.id + '"]');
+    if (b) b.classList.add('drop');
+  }
+}
+function clearTabDropHint() {
+  el('tabbar').classList.remove('dropping');
+  el('tabs').querySelectorAll('.wtab.drop').forEach(b => b.classList.remove('drop'));
+}
+
+function wireTabs() {
+  el('newTab').addEventListener('click', () => {
+    const node = graph.map.get(graph.opened) || null;
+    if (node) { openTabForNode(node); return; }
+    toast('Open a note or folder first, or drag a bubble onto the tab bar.');
+  });
+  el('splitTab').addEventListener('click', toggleSplit);
+}
+
+// Tabs live in the vault config, so a vault carries its own workspaces.
+function saveTabs() {
+  const slim = tabs.map(t => ({
+    id: t.id, title: t.title, scopeId: t.scopeId,
+    pinned: !!t.pinned, kind: t.kind || 'scope', lens: t.lens || 'free'
+  }));
+  updateConfig({ tabs: slim, activeTabId, splitTabId });
+}
+function loadTabs() {
+  const stored = Array.isArray(config.tabs) ? config.tabs : null;
+  tabs = (stored && stored.length) ? stored.slice() : defaultTabs();
+  if (!tabs.some(t => t.id === MASTER_TAB.id)) tabs.unshift(Object.assign({}, MASTER_TAB));
+  if (!tabs.some(t => t.kind === 'ingest')) tabs.push(Object.assign({}, INGEST_TAB));
+  activeTabId = tabById(config.activeTabId) ? config.activeTabId : tabs[0].id;
+  splitTabId = tabById(config.splitTabId) && config.splitTabId !== activeTabId ? config.splitTabId : null;
+}
+
+// A tab whose folder was renamed or deleted elsewhere must not linger as a
+// dead view.
+function pruneTabs() {
+  if (!lastScan) return;
+  const ids = new Set(lastScan.nodes.map(n => n.id));
+  const before = tabs.length;
+  tabs = tabs.filter(t => t.pinned || ids.has(t.scopeId));
+  if (tabs.length === before) return;
+  if (!tabById(activeTabId)) activeTabId = tabs[0].id;
+  if (!tabById(splitTabId)) splitTabId = null;
+  renderTabs(); saveTabs();
+  toast('Closed ' + (before - tabs.length) + ' tab(s) whose folder is gone');
+}
 
 // ---------- main-process events ----------
 function handleMenuAction(action) {
@@ -72,6 +435,23 @@ function handleMenuAction(action) {
     case 'recents':       toggleRecents(); break;
     case 'cycle-theme':   cycleTheme(); break;
     case 'open-help':     openSettings(); selectSettingsTab('help'); break;
+    case 'check-updates': openSettings(); selectSettingsTab('help'); checkForUpdates(); break;
+    case 'new-tab': {
+      const node = graph.map.get(graph.opened);
+      if (node) openTabForNode(node); else toast('Open a note or folder first, or drag a bubble onto the tab bar.');
+      break;
+    }
+    case 'close-tab': {
+      const t = activeTab();
+      if (t && !t.pinned) closeTab(t.id); else toast('The Master tab stays put.');
+      break;
+    }
+    case 'split': toggleSplit(); break;
+    case 'cycle-lens': {
+      const order = ['free', 'mind', 'skills', 'knowledge'];
+      setLens(order[(order.indexOf(graph.lens || 'free') + 1) % order.length]);
+      break;
+    }
   }
 }
 
@@ -105,15 +485,9 @@ function applyConfig(cfg) {
   for (const k of Object.keys(th)) if (k.startsWith('--')) root.setProperty(k, th[k]);
   root.setProperty('--accent', config.accent || '#7c9cff');
   root.setProperty('--accent-soft', hexA(config.accent || '#7c9cff', th.dark ? .22 : .14));
-  if (graph) graph.setConfig({
-    background: config.background, gridColor: th.grid, gridSpacing: config.gridSpacing,
-    nodeScale: config.nodeScale, labelScale: config.labelScale, folderBase: config.folderBase, folderGrow: config.folderGrow,
-    threshold: config.threshold, ramp: config.ramp, repulsion: config.repulsion, spring: config.spring,
-    linkTension: config.linkTension, packing: config.packing, animSpeed: config.animSpeed, inertia: config.inertia,
-    longPressMs: config.longPressMs, ripples: config.ripples, showMinimap: config.showMinimap,
-    showSuggestions: config.showSuggestions, reveal: config.reveal || 'fade',
-    edgeStyle: config.edgeStyle || 'curved', folderColors: config.folderColors || {}
-  });
+  const gc = graphConfig();
+  if (panes.a) panes.a.setConfig(gc);
+  if (panes.b) panes.b.setConfig(gc);
   syncControls();
 }
 async function updateConfig(patch) { config = await api.setConfig(patch); applyConfig(config); }
@@ -130,23 +504,66 @@ function wireCapture() {
   box.addEventListener('input', grow);
   let pv = null;
   box.addEventListener('input', () => { clearTimeout(pv); pv = setTimeout(async () => { const text = box.value.trim(); if (!text) { el('destination').textContent = ''; return; } const p = await api.previewThought(text); el('destination').textContent = p ? '→ ' + p.folder : ''; }, 180); });
-  box.addEventListener('keydown', async e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault(); const text = box.value.trim(); if (!text) return;
-      if (!vaultPath) { vaultPath = await api.chooseVault(); if (!vaultPath) return; el('noVault').classList.add('hidden'); setVaultName(); }
-      let res;
-      try { res = await api.captureThought(text); }
-      catch (err) { toast((err && err.message) || 'Could not save that thought.'); return; }
-      box.value = ''; box.style.height = 'auto'; el('destination').textContent = '';
-      await refresh(); showWorkspace(true, true); graph.reheat(1);
-      setTimeout(() => { graph.focusNote(res.id); if (config.ripples) graph.rippleNote(res.id); if (config.sound) playTick(); }, 480);
-      // filing is a guess, so always offer the correction inline rather than
-      // making the user hunt the note down in the graph
-      toastAction('Filed in <b>' + escapeHtml(res.folder) + '</b>', 'Wrong folder?', () => refileCapture(res, text));
-    }
-  });
+  box.addEventListener('keydown', onCaptureKey);
   el('chooseVault').addEventListener('click', pickVault);
   el('toGraph').addEventListener('click', () => showWorkspace(true));
+}
+
+// Enter on the capture screen must always file the thought — never quietly
+// insert a newline. Two ways it used to fall through:
+//   * mid-IME `keydown` reports key 'Process' / keyCode 229, not 'Enter', so the
+//     branch was skipped and the browser inserted the newline itself;
+//   * a second Enter pressed during the await (vault picker, capture, rescan)
+//     re-entered the handler in a half-updated state.
+// Now: bare Enter is always swallowed, composition is respected, and captures
+// cannot overlap.
+let capturing = false;
+
+function isEnterKey(e) {
+  return e.key === 'Enter' || e.keyCode === 13 || e.which === 13;
+}
+function isComposing(e) {
+  return !!e.isComposing || e.keyCode === 229;
+}
+
+async function onCaptureKey(e) {
+  if (!isEnterKey(e) || e.shiftKey) return;   // Shift+Enter keeps its newline
+  if (isComposing(e)) return;                 // let the IME commit its candidate
+
+  e.preventDefault();                          // no stray newline, whatever follows
+  if (e.repeat || capturing) return;
+
+  const box = el('thought');
+  const text = box.value.trim();
+  if (!text) return;
+
+  capturing = true;
+  try {
+    if (!vaultPath) {
+      vaultPath = await api.chooseVault();
+      if (!vaultPath) return;
+      el('noVault').classList.add('hidden');
+      setVaultName();
+    }
+    let res;
+    try { res = await api.captureThought(text); }
+    catch (err) { toast((err && err.message) || 'Could not save that thought.'); return; }
+
+    box.value = ''; box.style.height = 'auto'; el('destination').textContent = '';
+    await refresh();
+    showWorkspace(true, true);
+    graph.reheat(1);
+    setTimeout(() => {
+      graph.focusNote(res.id);
+      if (config.ripples) graph.rippleNote(res.id);
+      if (config.sound) playTick();
+    }, 480);
+    // filing is a guess, so always offer the correction inline rather than
+    // making the user hunt the note down in the graph
+    toastAction('Filed in <b>' + escapeHtml(res.folder) + '</b>', 'Wrong folder?', () => refileCapture(res, text));
+  } finally {
+    capturing = false;
+  }
 }
 
 // ---------- workspace ----------
@@ -159,6 +576,12 @@ function wireWorkspace() {
   el('closeRecents').addEventListener('click', closeRecents);
   el('moveNoteBtn').addEventListener('click', doMoveNote);
   el('deleteNoteBtn').addEventListener('click', () => doDeleteNote());
+  el('openFolderBtn').addEventListener('click', () => currentNote && openFolderInExplorer(currentNote.id));
+  // double-click empty canvas spawns a note right there
+  el('graph').addEventListener('dblclick', e => {
+    if (graph._nodeAt(e.offsetX, e.offsetY)) return;
+    openSpawn(e.clientX, e.clientY);
+  });
   el('newGroupBtn').addEventListener('click', () => createGroup(''));
   el('importBtn').addEventListener('click', onImport);
   el('linkBtn').addEventListener('click', onAddLink);
@@ -207,12 +630,52 @@ function onGlobalKey(e) {
 
   if (e.key === 'Escape') {
     if (askOpen()) { finishAsk(null); return; }
+    if (spawnOpen()) { closeSpawn(); return; }
     if (!el('settingsModal').classList.contains('hidden')) { closeSettings(); return; }
     if (!el('palette').classList.contains('hidden')) { closePalette(); return; }
+    if (!el('recents').classList.contains('hidden')) { closeRecents(); return; }
     hideSearch(); hideCtx();
     return;
   }
-  if (askOpen()) return;          // the dialog handles its own keys
+  if (askOpen() || spawnOpen()) return;   // those handle their own keys
+
+  // Ctrl+Shift+N: spawn a note in the middle of the graph without leaving it
+  if (mod && e.shiftKey && key === 'n') {
+    e.preventDefault();
+    openSpawn(window.innerWidth / 2 - 140, window.innerHeight / 2 - 60);
+    return;
+  }
+  if (mod && key === 'a' && !inTextField(e)) { e.preventDefault(); graph.selectAllVisible(); return; }
+
+  // tabs
+  if (mod && key === 't' && !e.shiftKey) {
+    e.preventDefault();
+    const node = graph.map.get(graph.opened);
+    if (node) openTabForNode(node); else toast('Open a note or folder first, or drag a bubble onto the tab bar.');
+    return;
+  }
+  if (mod && key === 'w' && !inTextField(e)) {
+    e.preventDefault();
+    const t = activeTab();
+    if (t && !t.pinned) closeTab(t.id); else toast('The Master tab stays put.');
+    return;
+  }
+  if (mod && e.key === 'Tab') {
+    e.preventDefault();
+    if (tabs.length < 2) return;
+    const i = tabs.findIndex(t => t.id === activeTabId);
+    const next = tabs[(i + (e.shiftKey ? -1 + tabs.length : 1)) % tabs.length];
+    activateTab(next.id);
+    return;
+  }
+  if (mod && (e.key === '\\' || key === '\\')) { e.preventDefault(); toggleSplit(); return; }
+  if (mod && key === 'l' && !inTextField(e)) {
+    e.preventDefault();
+    const order = ['free', 'mind', 'skills', 'knowledge'];
+    const cur = graph.lens || 'free';
+    setLens(order[(order.indexOf(cur) + 1) % order.length]);
+    return;
+  }
 
   if (mod && key === 'k') { e.preventDefault(); openPalette(); return; }
   if (mod && key === 'z') {
@@ -264,7 +727,21 @@ function renderAbout() {
 }
 
 // ---------- data ----------
-async function refresh() { const data = await api.scanVault(); lastScan = data; graph.setData(data); buildLegend(); }
+// One scan feeds every visible pane; each pane sees it through its tab's scope.
+async function refresh() {
+  lastScan = await api.scanVault();
+  const a = activeTab();
+  if (a) {
+    const scopedA = scopeData(lastScan, a.scopeId);
+    panes.a.setData(scopedA);
+  }
+  if (splitTabId) {
+    const b = tabById(splitTabId);
+    if (b) panes.b.setData(scopeData(lastScan, b.scopeId));
+  }
+  pruneTabs();
+  buildLegend();
+}
 function buildLegend() {
   const legend = el('legend'); legend.innerHTML = '';
   const et = new Set(['wikilink', 'tag', 'parent']);
@@ -332,6 +809,43 @@ async function makeChild(childId, parentId) {
   pushUndo('parent of ' + short(child.title), async () => { await api.setParent(childId, res.prev); await refresh(); });
   await refresh(); toast('<b>' + short(child.title) + '</b> is now a child of <b>' + short(parent.title) + '</b>');
 }
+// Collision tagging: bumping a note into a folder bubble files it there.
+async function dropInFolder(noteId, folderId) {
+  const note = graph.map.get(noteId), folder = graph.map.get(folderId);
+  if (!note || !folder) return;
+  const from = parentDirOf(noteId);
+  const res = await api.moveNote(noteId, folderId);
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not file that note.'); return; }
+  pushUndo('filing of ' + short(note.title), async () => { await api.moveNote(res.to, from); await refresh(); });
+  await refresh();
+  if (config.ripples) graph.rippleNote(res.to);
+  toast('<b>' + short(note.title) + '</b> filed into <b>' + short(folder.title) + '</b>');
+}
+
+async function toggleBurner(node) {
+  if (node.expires) {
+    const r = await api.setNoteTtl(node.id, 0);
+    if (!r || !r.ok) { toast('Could not update that note.'); return; }
+    await refresh(); toast('Self-destruct cancelled');
+    return;
+  }
+  const r = await askForm({
+    title: 'Burner note',
+    hint: '"' + short(node.title) + '" will delete itself when the timer runs out.',
+    okLabel: 'Set timer',
+    fields: [{ key: 'ttl', label: 'Delete after', value: '24', options: [
+      { value: '1', label: '1 hour' }, { value: '8', label: '8 hours' },
+      { value: '24', label: '1 day' }, { value: '168', label: '7 days' },
+      { value: '720', label: '30 days' }
+    ] }]
+  });
+  if (!r) return;
+  const res = await api.setNoteTtl(node.id, Number(r.ttl));
+  if (!res || !res.ok) { toast('Could not set the timer.'); return; }
+  await refresh();
+  toast('<b>' + short(node.title) + '</b> self-destructs in ' + (Number(r.ttl) >= 24 ? Math.round(Number(r.ttl) / 24) + 'd' : r.ttl + 'h'));
+}
+
 async function makeLink(fromId, toId) {
   const a = graph.map.get(fromId), b = graph.map.get(toId);
   const res = await api.addWikilink(fromId, toId); await refresh();
@@ -445,21 +959,55 @@ function updateSelbar(ids) {
   const canGroup = settings.groupCreate === 'selection' || settings.groupCreate === 'both';
   if (notes.length && canGroup) { el('selbar').classList.remove('hidden'); el('selcount').textContent = notes.length + ' selected'; } else el('selbar').classList.add('hidden');
 }
-function onFocusGraph() { el('focusbar').classList.remove('hidden'); }
+function onFocusGraph(node) {
+  el('focusbar').classList.remove('hidden');
+  if (node && node.id) graph.flare(node.id);   // pulse light along the connections
+}
 
 // ---------- context menu ----------
 function showCtx({ x, y, node }) {
   const m = el('ctxmenu'); m.innerHTML = ''; const mode = settings.groupCreate || 'both'; const canEmpty = mode === 'empty' || mode === 'both';
   const add = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { hideCtx(); fn(); }; m.appendChild(b); };
+  const sep = () => { const d = document.createElement('div'); d.className = 'sep'; m.appendChild(d); };
+
   if (node && node.type === 'note') {
     add('Open', () => openNote(node));
     add('Focus neighborhood', () => { graph.setFocus(node.id); onFocusGraph(); });
+    add('Flare connections', () => graph.flare(node.id));
+    sep();
     add('Move to folder…', async () => { await openNote(node); doMoveNote(); });
     add('Clear parent', async () => { await api.setParent(node.id, null); await refresh(); toast('Parent cleared'); });
+    add(node.expires ? 'Cancel self-destruct' : 'Make it a burner…', () => toggleBurner(node));
+    sep();
+    add('Open containing folder', () => openFolderInExplorer(node.id));
     add('Reveal file', () => api.reveal(node.id));
     add('Delete note…', () => doDeleteNote(node));
-  } else if (node && node.type === 'folder') { add('Zoom into folder', () => graph._zoomToNode(node)); if (canEmpty) add('New group inside', () => createGroup(node.id)); }
-  else { if (canEmpty) add('New group', () => createGroup('')); add('Recent notes', openRecents); add('Fit to view', () => graph.home()); }
+  } else if (node && node.type === 'folder') {
+    add('Zoom into folder', () => graph._zoomToNode(node));
+    add('Open in a new tab', () => openTabForNode(node));
+    if (splitTabId || tabs.length > 1) add('Open in the other pane', () => {
+      const t = openTabForNode(node, { pane: 'b' });
+      if (t) { splitTabId = t.id; renderTabs(); saveTabs(); }
+    });
+    add('Open in file explorer', () => openFolderInExplorer(node.id));
+    sep();
+    add('New thought inside', () => openSpawn(x, y));
+    if (canEmpty) add('New group inside', () => createGroup(node.id));
+    add('Rename folder…', () => doRenameFolder(node));
+    add('Change colour…', () => doFolderColor(node));
+    sep();
+    add('Merge into another folder…', () => doMergeFolder(node));
+    add('Delete folder…', () => doDeleteFolder(node));
+  } else {
+    add('New thought here', () => openSpawn(x, y));
+    if (canEmpty) add('New group', () => createGroup(''));
+    sep();
+    add('Recent notes', openRecents);
+    add('Select all visible', () => { graph.selectAllVisible(); });
+    add('Fit to view', () => graph.home());
+    sep();
+    add('Open vault in file explorer', () => openFolderInExplorer(''));
+  }
   if (!m.children.length) return; m.style.left = x + 'px'; m.style.top = y + 'px'; m.classList.remove('hidden');
 }
 function hideCtx() { el('ctxmenu').classList.add('hidden'); }
@@ -745,6 +1293,319 @@ function renderRecents() {
   }
 }
 
+// ---------- folder actions ----------
+async function openFolderInExplorer(relId) {
+  const r = await api.openFolder(relId || '');
+  if (!r || !r.ok) toast((r && r.error) || 'Could not open that folder.');
+}
+
+async function doRenameFolder(node) {
+  const name = await askText({
+    title: 'Rename folder', label: 'New name', value: node.title,
+    hint: 'Renames the folder on disk and updates every note inside it.'
+  });
+  if (!name || name === node.title) return;
+  const r = await api.renameFolder(node.id, name);
+  if (!r || !r.ok) { toast((r && r.error) || 'Could not rename that folder.'); return; }
+  await refresh(); toast('Renamed to <b>' + short(r.title) + '</b>');
+}
+
+async function doMergeFolder(node) {
+  const folders = (await api.listFolders()).filter(f => f !== node.id && f.indexOf(node.id + '/') !== 0);
+  const r = await askForm({
+    title: 'Merge "' + short(node.title) + '" into…',
+    hint: 'Moves everything across, then removes the empty folder.',
+    okLabel: 'Merge',
+    fields: [{ key: 'into', label: 'Destination', options: folderOptions(folders), value: '' }]
+  });
+  if (!r) return;
+  const res = await api.mergeFolders(node.id, r.into);
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not merge those folders.'); return; }
+  await refresh();
+  toast('Merged ' + res.moved.length + ' item(s) into <b>' + short(r.into || 'Inbox') + '</b>');
+}
+
+async function doDeleteFolder(node) {
+  const yes = await askConfirm({
+    title: 'Delete folder "' + short(node.title) + '"?',
+    hint: 'The folder and everything in it goes to your system trash, where you can still restore it.',
+    okLabel: 'Move to trash', danger: true
+  });
+  if (!yes) return;
+  const r = await api.deleteFolder(node.id);
+  if (!r || !r.ok) { toast((r && r.error) || 'Could not delete that folder.'); return; }
+  await refresh();
+  toast('Trashed <b>' + short(node.title) + '</b>' + (r.notes ? ' and ' + r.notes + ' note(s)' : ''));
+}
+
+async function doFolderColor(node) {
+  const current = (config.folderColors && config.folderColors[node.folder]) || graph.colorFor(node.folder);
+  const r = await askForm({
+    title: 'Colour for "' + short(node.title) + '"',
+    fields: [{ key: 'color', label: 'Pick a colour', options: COLOR_CHOICES, value: toHex(current) }],
+    okLabel: 'Apply'
+  });
+  if (!r) return;
+  const fc = Object.assign({}, config.folderColors);
+  fc[node.folder] = r.color;
+  await updateConfig({ folderColors: fc });
+  toast('Colour updated');
+}
+
+const COLOR_CHOICES = [
+  { value: '#7c9cff', label: 'Blue' }, { value: '#5ec8a0', label: 'Green' },
+  { value: '#f0a35e', label: 'Amber' }, { value: '#e879a6', label: 'Pink' },
+  { value: '#b98cff', label: 'Violet' }, { value: '#61c0e0', label: 'Cyan' },
+  { value: '#e0d15e', label: 'Yellow' }, { value: '#8fce5e', label: 'Lime' },
+  { value: '#ff8a7a', label: 'Coral' }, { value: '#9aa7b5', label: 'Grey' }
+];
+
+// ---------- in-graph note creation ----------
+let spawnAt = null;
+function openSpawn(screenX, screenY) {
+  showWorkspace(true, true);
+  const world = graph.worldAt(screenX, screenY);
+  const folderNode = graph.folderAtWorld(world.x, world.y);
+  spawnAt = { folder: folderNode ? folderNode.id : null, world };
+  const box = el('spawn');
+  el('spawnWhere').textContent = folderNode ? 'into ' + folderNode.title : 'auto-file by keyword';
+  el('spawnInput').value = '';
+  el('spawnBurner').checked = false;
+  box.style.left = Math.min(screenX, window.innerWidth - 300) + 'px';
+  box.style.top = Math.min(screenY, window.innerHeight - 170) + 'px';
+  box.classList.remove('hidden');
+  el('spawnInput').focus();
+}
+function closeSpawn() { el('spawn').classList.add('hidden'); spawnAt = null; }
+function spawnOpen() { return !el('spawn').classList.contains('hidden'); }
+
+async function commitSpawn() {
+  if (!spawnAt) return;
+  const text = el('spawnInput').value.trim();
+  if (!text) { closeSpawn(); return; }
+  const opts = {};
+  if (el('spawnBurner').checked) opts.ttlHours = Number(el('spawnTtl').value) || 24;
+  const where = spawnAt.folder;
+  closeSpawn();
+  let res;
+  try { res = await api.createNote(text, where, opts); }
+  catch (err) { toast((err && err.message) || 'Could not create that note.'); return; }
+  await refresh();
+  graph.focusNote(res.id);
+  if (config.ripples) graph.rippleNote(res.id);
+  toast(res.guessed
+    ? 'Filed in <b>' + escapeHtml(res.folder) + '</b>'
+    : 'Added to <b>' + escapeHtml(res.folder) + '</b>');
+}
+
+function wireSpawn() {
+  el('spawnInput').addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSpawn(); return; }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitSpawn(); }
+  });
+  el('spawnInput').addEventListener('blur', () => {
+    // let a click on the burner controls keep the box open
+    setTimeout(() => { if (spawnOpen() && !el('spawn').contains(document.activeElement)) closeSpawn(); }, 160);
+  });
+}
+
+// ---------- lens engine ----------
+function wireLens() {
+  document.querySelectorAll('.lens').forEach(b => b.addEventListener('click', () => setLens(b.dataset.lens)));
+}
+function setLens(name) {
+  graph.setLens(name === 'free' ? null : name);
+  document.querySelectorAll('.lens').forEach(b => b.classList.toggle('active', b.dataset.lens === name));
+  const labels = { free: 'Free layout', mind: 'My Mind — recent thoughts at the centre', skills: 'My Skills — prerequisite tree', knowledge: 'Knowledge — clustered by subject' };
+  toast(labels[name] || 'Layout changed');
+}
+
+// ---------- drag & drop / paste import ----------
+function wireDropAndPaste() {
+  const zone = el('dropzone');
+  let depth = 0;
+  const show = () => { depth++; zone.classList.remove('hidden'); };
+  const hide = () => { depth = Math.max(0, depth - 1); if (!depth) zone.classList.add('hidden'); };
+
+  window.addEventListener('dragenter', e => { if (hasFiles(e)) { e.preventDefault(); show(); } });
+  window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('dragleave', e => { if (hasFiles(e)) hide(); });
+  // While dragging over the canvas, name whatever the files would land on.
+  // Hit-testing is O(nodes), and dragover fires continuously, so do at most one
+  // pass per animation frame.
+  let hoverPending = false, hoverPt = null;
+  window.addEventListener('dragover', e => {
+    if (!hasFiles(e)) return;
+    hoverPt = { x: e.clientX, y: e.clientY };
+    if (hoverPending) return;
+    hoverPending = true;
+    requestAnimationFrame(() => {
+      hoverPending = false;
+      if (!hoverPt) return;
+      const label = zone.querySelector('.dropzone-inner');
+      if (!label) return;
+      let t;
+      try { t = dropTargetAt(hoverPt.x, hoverPt.y); } catch { t = { kind: 'none' }; }
+      label.textContent =
+        t.kind === 'note' ? 'Attach to "' + short(t.node.title) + '"'
+        : t.kind === 'tab' ? (t.tab.kind === 'ingest' ? 'Break down into ' + t.tab.title : 'Import into ' + t.tab.title)
+        : t.kind === 'folder' ? 'Import into ' + t.node.title
+        : (activeTab() && activeTab().kind === 'ingest') ? 'Break down into ' + activeTab().title
+        : 'Drop files to import';
+    });
+  });
+
+  // The drop itself is read in the preload (File objects must not cross the
+  // context bridge); we only get plain paths back.
+  window.addEventListener('drop', e => {
+    if (hasFiles(e)) e.preventDefault();
+    depth = 0; hoverPt = null;
+    zone.classList.add('hidden');
+    clearTabDropHint();
+  });
+
+  if (api.onFilesDropped) api.onFilesDropped(info => {
+    depth = 0; zone.classList.add('hidden'); clearTabDropHint();
+    const paths = (info && info.paths) || [];
+    if (!paths.length) {
+      toast(info && info.count
+        ? 'Could not read those files — try importing them from the toolbar.'
+        : 'Nothing to import.');
+      return;
+    }
+    routeDroppedFiles(paths, info.x, info.y).catch(err => {
+      toast('Import failed — see the log for details.');
+      console.error('drop routing failed', err);
+    });
+  });
+
+  window.addEventListener('paste', async e => {
+    if (inTextField({ target: document.activeElement })) return;
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (const it of items) {
+      if (it.kind !== 'file' || it.type.indexOf('image/') !== 0) continue;
+      e.preventDefault();
+      const blob = it.getAsFile();
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      const ext = (it.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      const r = await api.importImageBuffer(buf, 'pasted.' + ext, 'Imported');
+      if (!r || !r.ok) { toast((r && r.error) || 'Could not paste that image.'); return; }
+      await refresh();
+      openNote({ id: r.note.id });
+      toast('Pasted image → <b>' + short(r.note.title) + '</b>');
+      return;
+    }
+  });
+}
+function hasFiles(e) {
+  const dt = e.dataTransfer;
+  return !!dt && Array.from(dt.types || []).indexOf('Files') !== -1;
+}
+
+// Work out what a file drop at this screen point should hit: a note (attach),
+// a folder bubble (import there), a tab chip (import/break down into that tab),
+// or nothing in particular.
+function dropTargetAt(clientX, clientY) {
+  const tabHit = tabAtPoint(clientX, clientY);
+  if (tabHit !== undefined) return tabHit ? { kind: 'tab', tab: tabHit } : { kind: 'tabbar' };
+
+  if (el('workspace').classList.contains('hidden')) return { kind: 'none' };
+  const canvas = graph && graph.canvas;
+  if (!canvas) return { kind: 'none' };
+  const r = canvas.getBoundingClientRect();
+  if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return { kind: 'none' };
+
+  const px = clientX - r.left, py = clientY - r.top;
+  const node = graph._nodeAt(px, py);
+  if (node && node.type === 'note') return { kind: 'note', node };
+  if (node && node.type === 'folder') return { kind: 'folder', node };
+  const world = graph.worldAt(px, py);
+  const folder = graph.folderAtWorld(world.x, world.y);
+  return folder ? { kind: 'folder', node: folder } : { kind: 'none' };
+}
+
+async function routeDroppedFiles(paths, clientX, clientY) {
+  const target = dropTargetAt(clientX, clientY);
+
+  // dropped straight onto a note: attach the files to it
+  if (target.kind === 'note') { await routeAttach(target.node.id, paths, target.node.title); return; }
+
+  // dropped on a tab chip
+  if (target.kind === 'tab') {
+    if (target.tab.kind === 'ingest') { await breakdownInto(paths, target.tab); return; }
+    await importDropped(paths, null, null, target.tab.scopeId || 'Imported');
+    activateTab(target.tab.id);
+    return;
+  }
+
+  // the Breakdown tab is active: everything dropped gets taken apart
+  const act = activeTab();
+  if (act && act.kind === 'ingest') { await breakdownInto(paths, act); return; }
+
+  if (target.kind === 'folder') { await importDropped(paths, null, null, target.node.id); return; }
+  await importDropped(paths, clientX, clientY);
+}
+
+async function routeAttach(noteId, paths, title) {
+  const res = await api.attachToNote(noteId, paths, { alsoChildNotes: true });
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not attach those files.'); return; }
+  await refresh();
+  await openNote({ id: noteId });
+  const name = short(title || (graph.map.get(noteId) || {}).title || 'the note');
+  const kids = res.children.length ? ' · ' + res.children.length + ' child note(s)' : '';
+  const skipped = res.skipped.length ? ' · skipped ' + res.skipped.length : '';
+  toast('Attached ' + res.attached.length + ' file(s) to <b>' + name + '</b>' + kids + skipped);
+}
+
+async function breakdownInto(paths, tab) {
+  const res = await api.breakdownFile(paths, tab.scopeId || 'Breakdown');
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not break those files down.'); return; }
+  await refresh();
+  activateTab(tab.id);
+  const parts = res.docs.reduce((n, d) => n + d.parts.length, 0);
+  if (res.docs.length) {
+    const first = res.docs[0].doc;
+    setTimeout(() => { graph.focusNote(first.id); graph.flare(first.id); }, 250);
+  }
+  const skipped = res.skipped.length ? ' · skipped ' + res.skipped.length : '';
+  toast('Broke down ' + res.docs.length + ' file(s) into <b>' + parts + '</b> part(s)' + skipped);
+}
+
+async function importDropped(paths, screenX, screenY, forceFolder) {
+  // drop inside a folder bubble => import into that folder
+  let folder = forceFolder || 'Imported';
+  if (!forceFolder && typeof screenX === 'number' && !el('workspace').classList.contains('hidden')) {
+    const rect = el('graph').getBoundingClientRect();
+    const world = graph.worldAt(screenX - rect.left, screenY - rect.top);
+    const fnode = graph.folderAtWorld(world.x, world.y);
+    if (fnode) folder = fnode.id;
+  }
+  const mdCount = paths.filter(p => /\.(md|markdown)$/i.test(p)).length;
+  let split = false;
+  if (mdCount) {
+    const r = await askForm({
+      title: 'Import ' + paths.length + ' file' + (paths.length === 1 ? '' : 's'),
+      hint: mdCount + ' Markdown file' + (mdCount === 1 ? '' : 's') + ' can be broken into linked sub-notes.',
+      okLabel: 'Import',
+      fields: [
+        { key: 'folder', label: 'Into folder', options: folderOptions(await api.listFolders()).concat([{ value: 'Imported', label: 'Imported (new)' }]), value: folder },
+        { key: 'split', label: 'Markdown handling', value: 'yes', options: [
+          { value: 'yes', label: 'Split on headings into linked sub-notes' },
+          { value: 'no', label: 'Keep each file as one note' }
+        ] }
+      ]
+    });
+    if (!r) return;
+    folder = r.folder; split = r.split === 'yes';
+  }
+  const res = await api.importPaths(paths, { folder, split });
+  if (!res || !res.ok) { toast((res && res.error) || 'Import failed.'); return; }
+  await refresh();
+  if (res.created.length) graph.focusNote(res.created[0].id);
+  const skipped = res.skipped.length ? ' · skipped ' + res.skipped.length : '';
+  toast('Imported <b>' + res.created.length + '</b> note(s)' + skipped);
+}
+
 // Resolve a [[wikilink]] title to a note and open it.
 function openByTitle(name) {
   const want = String(name).split('|')[0].trim().toLowerCase();
@@ -796,6 +1657,27 @@ function renderPalette() {
     { kind: 'action', label: 'New thought', run: () => { closePalette(); newThought(); } },
     { kind: 'action', label: 'Fit / Home', run: () => { closePalette(); graph.home(); } },
     { kind: 'action', label: 'Recent notes', run: () => { closePalette(); openRecents(); } },
+    { kind: 'action', label: 'New thought in the graph', run: () => { closePalette(); openSpawn(window.innerWidth / 2 - 140, window.innerHeight / 2 - 60); } },
+    { kind: 'action', label: 'Open vault in file explorer', run: () => { closePalette(); openFolderInExplorer(''); } },
+    { kind: 'action', label: 'Lens: Free layout', run: () => { closePalette(); setLens('free'); } },
+    { kind: 'action', label: 'Lens: My Mind (recent at centre)', run: () => { closePalette(); setLens('mind'); } },
+    { kind: 'action', label: 'Lens: My Skills (prerequisite tree)', run: () => { closePalette(); setLens('skills'); } },
+    { kind: 'action', label: 'Lens: Knowledge (subject clusters)', run: () => { closePalette(); setLens('knowledge'); } },
+    { kind: 'action', label: 'Import files…', run: async () => { closePalette(); onImport(); } },
+    { kind: 'action', label: 'Break down a file into its parts…', run: async () => {
+      closePalette();
+      const paths = await api.pickFiles('Choose a file to break down');
+      if (!paths.length) return;
+      const ingest = tabs.find(t => t.kind === 'ingest') || INGEST_TAB;
+      await breakdownInto(paths, ingest);
+    } },
+    { kind: 'action', label: 'Attach files to this note…', run: async () => {
+      closePalette();
+      if (!currentNote) { toast('Open a note first.'); return; }
+      const paths = await api.pickFiles('Choose files to attach');
+      if (!paths.length) return;
+      await routeAttach(currentNote.id, paths);
+    } },
     { kind: 'action', label: 'New group', run: () => { closePalette(); createGroup(''); } },
     { kind: 'action', label: 'Save a link', run: () => { closePalette(); onAddLink(); } },
     { kind: 'action', label: 'Move this note to another folder', run: () => { closePalette(); doMoveNote(); } },
@@ -841,6 +1723,7 @@ function wireSettings() {
     const r = await api.showLog();
     if (!r || !r.ok) toast('No log file yet.');
   });
+  wireUpdates();
 
   // theme chips
   const tr = el('themeRow');
@@ -886,6 +1769,90 @@ function renderFolderColors() {
     box.appendChild(row);
   }
 }
+// ---------- updates ----------
+function setUpdateStatus(html, kind) {
+  const s = el('updateStatus');
+  if (!s) return;
+  s.innerHTML = html;
+  s.className = 'update-status' + (kind ? ' ' + kind : '');
+}
+function relDate(iso) {
+  const t = Date.parse(iso || '');
+  if (!t) return '';
+  const days = Math.floor((Date.now() - t) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 30) return days + ' days ago';
+  return new Date(t).toLocaleDateString();
+}
+
+async function checkForUpdates() {
+  const btn = el('checkUpdatesBtn');
+  btn.disabled = true;
+  el('installUpdateBtn').classList.add('hidden');
+  el('openReleaseBtn').classList.add('hidden');
+  el('updateNotes').classList.add('hidden');
+  setUpdateStatus('Checking GitHub…');
+
+  let r;
+  try { r = await api.checkUpdates(); }
+  catch (err) { r = { ok: false, error: (err && err.message) || 'Check failed.' }; }
+  btn.disabled = false;
+
+  if (!r || !r.ok) {
+    setUpdateStatus('Could not check: ' + escapeHtml((r && r.error) || 'unknown error'), 'err');
+    return;
+  }
+  if (r.status === 'none') {
+    setUpdateStatus('No releases have been published yet. You are running <b>' + escapeHtml(r.current) + '</b>.');
+    return;
+  }
+
+  el('openReleaseBtn').classList.remove('hidden');
+  if (r.notes) {
+    const n = el('updateNotes');
+    n.textContent = r.notes;
+    n.classList.remove('hidden');
+  }
+
+  if (r.status === 'current') {
+    setUpdateStatus('You are up to date — <b>' + escapeHtml(r.current) + '</b> is the latest release.', 'ok');
+    return;
+  }
+
+  // an update exists
+  const head = 'Version <b>' + escapeHtml(r.latest) + '</b> is available (released ' +
+    escapeHtml(relDate(r.published)) + '). You have <b>' + escapeHtml(r.current) + '</b>.';
+
+  if (r.canAutoInstall) {
+    setUpdateStatus(head + '<br>Downloading it now — you will be asked to restart when it is ready.', 'new');
+    return;
+  }
+  if (!r.packaged) {
+    setUpdateStatus(head + '<br>You are running from source, so there is nothing to auto-update: ' +
+      '<b>git pull</b> and restart.', 'new');
+    return;
+  }
+  if (!r.hasFeed) {
+    setUpdateStatus(head + '<br>That release has no <b>latest.yml</b> attached, so it cannot install itself. ' +
+      'Download the installer from the release page.', 'new');
+    return;
+  }
+  setUpdateStatus(head + '<br>Download it from the release page.', 'new');
+}
+
+function wireUpdates() {
+  el('checkUpdatesBtn').addEventListener('click', checkForUpdates);
+  el('openReleaseBtn').addEventListener('click', async () => {
+    const r = await api.openRelease();
+    if (!r || !r.ok) toast('Could not open the release page.');
+  });
+  el('installUpdateBtn').addEventListener('click', async () => {
+    const r = await api.installUpdate();
+    if (!r || !r.ok) toast((r && r.error) || 'Could not install the update.');
+  });
+}
+
 async function applyShortcut() {
   const accel = el('quickShortcut').value.trim() || 'Control+Shift+Space';
   const enabled = el('quickCaptureEnabled').checked;

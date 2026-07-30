@@ -33,16 +33,55 @@ let quickWindow = null;
 let tray = null;
 let isQuitting = false;
 
+// True once the on-disk settings have been read (or shown not to exist). Until
+// then we must not write: an early save would persist bare defaults over a
+// perfectly good config.
+let settingsLoaded = false;
+// Set only when the user deliberately picks (or clears) a vault, so an
+// in-memory null can never silently overwrite a stored path.
+let vaultExplicitlySet = false;
+
 function loadSettings() {
+  let raw = null;
   try {
-    settings = Object.assign(settings, JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')));
+    raw = fs.readFileSync(SETTINGS_PATH, 'utf8');
   } catch (err) {
-    if (err.code !== 'ENOENT') log.warn('could not read settings: ', err);
+    if (err.code === 'ENOENT') { settingsLoaded = true; return; }   // first run
+    log.error('could not read settings: ', err);
+    return;                                                         // stays unloaded: no writes
+  }
+  try {
+    settings = Object.assign(settings, JSON.parse(raw));
+    settingsLoaded = true;
+  } catch (err) {
+    // Corrupt file. Keep a copy so the vault path is recoverable by hand, and
+    // refuse to write until the user makes a deliberate choice.
+    log.error('settings file is not valid JSON — keeping a backup and starting fresh: ', err);
+    try { fs.writeFileSync(SETTINGS_PATH + '.corrupt', raw); } catch {}
+    settingsLoaded = true;
   }
 }
+
 function saveSettings() {
-  try { writeJsonAtomic(SETTINGS_PATH, settings); }
-  catch (err) { log.error('could not save settings — vault choice may not persist: ', err); }
+  if (!settingsLoaded) {
+    log.warn('refusing to save settings before they were loaded');
+    return;
+  }
+  try {
+    // Guard: if we somehow hold no vault but disk remembers one, keep disk's.
+    if (!settings.vaultPath && !vaultExplicitlySet) {
+      try {
+        const onDisk = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+        if (onDisk && onDisk.vaultPath) {
+          log.warn('kept the stored vault path instead of overwriting it with null');
+          settings.vaultPath = onDisk.vaultPath;
+        }
+      } catch {}
+    }
+    writeJsonAtomic(SETTINGS_PATH, settings);
+  } catch (err) {
+    log.error('could not save settings — vault choice may not persist: ', err);
+  }
 }
 
 function rulesPath() { return settings.vaultPath ? path.join(settings.vaultPath, '.synapse', 'rules.json') : null; }
@@ -65,7 +104,9 @@ const DEFAULT_CONFIG = {
   animSpeed: 1, inertia: true, longPressMs: 2000,
   ripples: true, sound: false, showMinimap: true, showSuggestions: false,
   reveal: 'fade', edgeStyle: 'curved',
-  folderColors: {}
+  folderColors: {},
+  // workspace tabs travel with the vault
+  tabs: [], activeTabId: null, splitTabId: null
 };
 function configPath() { return settings.vaultPath ? path.join(settings.vaultPath, '.synapse', 'config.json') : null; }
 function loadConfig() {
@@ -331,7 +372,12 @@ function buildMenu() {
         { label: 'Reload vault from disk', accelerator: 'CmdOrCtrl+R', click: send('rescan') },
         { label: 'Recent notes', accelerator: 'CmdOrCtrl+E', click: send('recents') },
         { type: 'separator' },
-        { label: 'Cycle theme', accelerator: 'CmdOrCtrl+T', click: send('cycle-theme') },
+        { label: 'New tab from selection', accelerator: 'CmdOrCtrl+T', click: send('new-tab') },
+        { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: send('close-tab') },
+        { label: 'Toggle split view', accelerator: 'CmdOrCtrl+\\', click: send('split') },
+        { label: 'Cycle layout lens', accelerator: 'CmdOrCtrl+L', click: send('cycle-lens') },
+        { type: 'separator' },
+        { label: 'Cycle theme', accelerator: 'CmdOrCtrl+Shift+T', click: send('cycle-theme') },
         { role: 'togglefullscreen' },
         { type: 'separator' },
         { label: 'Reload window', accelerator: 'CmdOrCtrl+Shift+R', click: () => mainWindow && mainWindow.reload() },
@@ -342,6 +388,9 @@ function buildMenu() {
       label: '&Help',
       submenu: [
         { label: 'How to use Synapse', click: send('open-help') },
+        // opens Settings on the same panel as the button, so there is one place
+        // that answers "am I up to date?"
+        { label: 'Check for updates…', click: send('check-updates') },
         { label: 'Open log file', click: () => { const f = log.file(); if (f) shell.showItemInFolder(f); } },
         { type: 'separator' },
         { label: 'About Synapse ' + app.getVersion(), click: () => {
@@ -397,6 +446,12 @@ function startWatch() {
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   // A second copy would race the first one writing the same vault files.
+  // Log it before quitting: if the holder is a zombie with no window, the user
+  // sees an app that "won't start" and otherwise has nothing to go on.
+  try {
+    log.init(app.getPath('logs'));
+    log.warn('another Synapse instance already holds the lock — focusing it and exiting');
+  } catch {}
   app.quit();
 } else {
   app.on('second-instance', () => { showMain(); });
@@ -418,6 +473,10 @@ if (!gotLock) {
         mainWindow.webContents.send('shortcut-failed', shortcut.error));
     }
     startWatch();
+
+    // burner notes self-destruct: sweep at launch, then hourly
+    try { purgeExpired(); } catch (err) { log.warn('burner sweep failed: ', err); }
+    setInterval(() => { try { purgeExpired(); } catch (err) { log.warn('burner sweep failed: ', err); } }, 15 * 60 * 1000);
 
     try { require('./updater').initAutoUpdate(mainWindow); }
     catch (err) { log.warn('auto-update unavailable: ', err); }
@@ -478,6 +537,7 @@ handle('choose-vault', async () => {
   });
   if (r.canceled || !r.filePaths[0]) return settings.vaultPath;
   settings.vaultPath = r.filePaths[0];
+  vaultExplicitlySet = true;          // a deliberate choice may overwrite disk
   saveSettings();
   ensureVaultScaffold();
   vault.clearCache();
@@ -798,6 +858,530 @@ handle('move-note', (_e, id, folderId) => {
   } catch (err) { log.warn('could not update folder field for ' + id + ': ', err); }
   fs.renameSync(src, dest);
   return { ok: true, to: relOf(dest) };
+});
+
+// ---- folder operations ----
+
+// Open a vault folder (or a note's containing folder) in the OS file manager.
+handle('open-folder', async (_e, relId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const abs = relId ? inVault(relId) : path.resolve(settings.vaultPath);
+  let dir = abs;
+  try { if (fs.statSync(abs).isFile()) dir = path.dirname(abs); }
+  catch { return { ok: false, error: 'That folder no longer exists.' }; }
+  // shell.openPath resolves with an error string; '' means it opened
+  const msg = await shell.openPath(dir);
+  if (msg) { log.warn('openPath: ' + msg); return { ok: false, error: msg }; }
+  return { ok: true, path: dir };
+});
+
+handle('rename-folder', (_e, relId, newName) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const src = inVault(relId);
+  const safe = sanitizeName(newName, '');
+  if (!safe) return { ok: false, error: 'Enter a folder name.' };
+  const dest = path.join(path.dirname(src), safe);
+  if (path.resolve(dest) === path.resolve(src)) return { ok: true, id: relId };
+  if (fs.existsSync(dest)) return { ok: false, error: 'A folder called "' + safe + '" already exists here.' };
+  touched();
+  fs.renameSync(src, dest);
+  // keep each note's `folder:` field in step with its new home
+  for (const file of vault.walk(dest)) {
+    try {
+      const parts = fmlib.splitFM(fs.readFileSync(file, 'utf8'));
+      parts.fm.folder = safe;
+      if (!parts.order.includes('folder')) parts.order.push('folder');
+      writeFileAtomic(file, fmlib.joinFM(parts), 'utf8');
+    } catch (err) { log.warn('rename: could not update ' + file + ': ', err); }
+  }
+  vault.clearCache();
+  log.info('renamed folder ' + relId + ' -> ' + safe);
+  return { ok: true, id: relOf(dest), title: safe };
+});
+
+// Merge folder A into folder B: move every child across, then remove A.
+handle('merge-folders', (_e, fromId, intoId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  if (!fromId || fromId === intoId) return { ok: false, error: 'Pick two different folders.' };
+  const src = inVault(fromId);
+  const dest = intoId ? inVault(intoId) : path.resolve(settings.vaultPath);
+  if (path.resolve(dest).startsWith(path.resolve(src) + path.sep)) {
+    return { ok: false, error: 'Cannot merge a folder into one of its own subfolders.' };
+  }
+  fs.mkdirSync(dest, { recursive: true });
+  const destName = intoId ? intoId.split('/').pop() : 'Inbox';
+  const moved = [];
+  touched();
+  let entries = [];
+  try { entries = fs.readdirSync(src, { withFileTypes: true }); } catch { return { ok: false, error: 'That folder no longer exists.' }; }
+  for (const e of entries) {
+    if (e.name === '.keep') continue;
+    const from = path.join(src, e.name);
+    let to = path.join(dest, e.name);
+    let n = 2;
+    while (fs.existsSync(to)) {
+      const ext = e.isDirectory() ? '' : path.extname(e.name);
+      to = path.join(dest, path.basename(e.name, ext) + '-' + n++ + ext);
+    }
+    if (e.isFile() && e.name.toLowerCase().endsWith('.md')) {
+      try {
+        const parts = fmlib.splitFM(fs.readFileSync(from, 'utf8'));
+        parts.fm.folder = destName;
+        if (!parts.order.includes('folder')) parts.order.push('folder');
+        writeFileAtomic(from, fmlib.joinFM(parts), 'utf8');
+      } catch (err) { log.warn('merge: could not update ' + from + ': ', err); }
+    }
+    fs.renameSync(from, to);
+    moved.push({ from: relOf(from), to: relOf(to) });
+  }
+  try { fs.rmSync(src, { recursive: true, force: true }); }
+  catch (err) { log.warn('merge: could not remove empty ' + fromId + ': ', err); }
+  vault.clearCache();
+  log.info('merged ' + fromId + ' into ' + (intoId || 'vault root') + ' (' + moved.length + ' items)');
+  return { ok: true, moved, into: intoId || '' };
+});
+
+handle('delete-folder', async (_e, relId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const dir = inVault(relId);
+  const notes = vault.walk(dir).length;
+  touched();
+  await shell.trashItem(dir);
+  vault.clearCache();
+  log.info('trashed folder ' + relId + ' (' + notes + ' notes)');
+  return { ok: true, notes };
+});
+
+// ---- in-graph note creation ----
+// Creating a thought should not require going back to the splash screen, and
+// when you create it inside a folder bubble it belongs to that folder — no
+// classifier guess required.
+handle('create-note', (_e, text, folderId, opts) => {
+  if (!settings.vaultPath) throw new Error('No vault selected.');
+  const body = String(text || '').trim();
+  if (!body) throw new Error('Nothing to save.');
+  const o = opts || {};
+
+  let folder = folderId;
+  let decision = null;
+  if (folder == null) {                       // no explicit folder: classify
+    decision = classifier.classify(body, loadRules());
+    folder = decision.folder;
+  }
+  const dir = folder ? inVault(folder) : path.resolve(settings.vaultPath);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const tags = classifier.extractTags(body);
+  const note = classifier.buildNote(body, folder ? folder.split('/').pop() : 'Inbox', tags);
+  let content = note.content;
+
+  // Ephemeral "burner" note: self-destructs after the given number of hours.
+  if (o.ttlHours) {
+    const expires = new Date(Date.now() + Number(o.ttlHours) * 3600000).toISOString();
+    const parts = fmlib.splitFM(content);
+    parts.fm.expires = expires;
+    if (!parts.order.includes('expires')) parts.order.push('expires');
+    content = fmlib.joinFM(parts);
+  }
+  if (o.parent) {
+    try { inVault(o.parent); content = fmlib.setParentContent(content, o.parent); }
+    catch { log.warn('create-note: ignoring bad parent ' + o.parent); }
+  }
+
+  let file = path.join(dir, note.slug + '.md');
+  let n = 2;
+  while (fs.existsSync(file)) file = path.join(dir, note.slug + '-' + n++ + '.md');
+  touched();
+  writeFileAtomic(file, content, 'utf8');
+  log.info('created note in ' + (folder || 'vault root') + (o.ttlHours ? ' (burner ' + o.ttlHours + 'h)' : ''));
+  return { id: relOf(file), title: note.title, folder: folder || 'Inbox', guessed: !!decision };
+});
+
+// ---- broad import ----
+const TEXTUAL = new Set(['.md', '.markdown', '.txt', '.csv', '.tsv', '.log', '.json']);
+const EMBEDDABLE = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.pdf',
+  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.zip', '.mp4', '.mp3', '.wav']);
+
+function copyToAttachments(src) {
+  const attachDir = path.join(settings.vaultPath, vault.ATTACH_DIR);
+  fs.mkdirSync(attachDir, { recursive: true });
+  const base = path.basename(src);
+  let dest = path.join(attachDir, base);
+  let n = 2;
+  while (fs.existsSync(dest)) {
+    const ext = path.extname(base);
+    dest = path.join(attachDir, path.basename(base, ext) + '-' + n++ + ext);
+  }
+  fs.copyFileSync(src, dest);
+  const rel = path.posix.join(vault.ATTACH_DIR, path.basename(dest));
+  const isImg = /\.(png|jpe?g|gif|webp|svg)$/i.test(dest);
+  return { name: path.basename(dest), rel, markdown: (isImg ? '!' : '') + '[' + path.basename(dest) + '](' + rel + ')' };
+}
+
+/**
+ * Import arbitrary files as notes. Markdown/text becomes note content (and can
+ * be auto-split into linked sub-notes); anything else is copied into
+ * attachments/ and wrapped in a note that previews it.
+ */
+handle('import-paths', (_e, paths, opts) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const o = opts || {};
+  const folder = o.folder == null ? 'Imported' : o.folder;
+  const dir = folder ? inVault(folder) : path.resolve(settings.vaultPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const created = [];
+  const skipped = [];
+  touched();
+
+  for (const src of (paths || [])) {
+    let stat;
+    try { stat = fs.statSync(src); } catch { skipped.push({ path: src, why: 'unreadable' }); continue; }
+    if (stat.isDirectory()) { skipped.push({ path: src, why: 'folders are not imported' }); continue; }
+    if (stat.size > 64 * 1024 * 1024) { skipped.push({ path: src, why: 'larger than 64MB' }); continue; }
+
+    const ext = path.extname(src).toLowerCase();
+    const base = path.basename(src, ext);
+
+    try {
+      if (TEXTUAL.has(ext)) {
+        const raw = fs.readFileSync(src, 'utf8');
+        if (o.split && (ext === '.md' || ext === '.markdown')) {
+          const sections = classifier.splitMarkdown(raw, { minChars: 2 });
+          if (sections.length > 1) {
+            const parentRes = writeNoteFile(dir, base, 'Imported from ' + path.basename(src) + '\n', folder, null);
+            created.push(parentRes);
+            for (const s of sections) {
+              created.push(writeNoteFile(dir, s.title, s.body, folder, parentRes.id));
+            }
+            continue;
+          }
+        }
+        created.push(writeNoteFile(dir, base, raw, folder, o.parent || null));
+      } else if (EMBEDDABLE.has(ext)) {
+        const att = copyToAttachments(src);
+        created.push(writeNoteFile(dir, base, att.markdown + '\n', folder, o.parent || null));
+      } else {
+        const att = copyToAttachments(src);
+        created.push(writeNoteFile(dir, base, att.markdown + '\n', folder, o.parent || null));
+      }
+    } catch (err) {
+      log.warn('import failed for ' + src + ': ', err);
+      skipped.push({ path: src, why: 'import failed' });
+    }
+  }
+  log.info('imported ' + created.length + ' note(s), skipped ' + skipped.length);
+  return { ok: true, created, skipped, folder: folder || '' };
+});
+
+function writeNoteFile(dir, rawTitle, body, folder, parentId) {
+  const title = classifier.deriveTitle(rawTitle || body || 'Untitled');
+  const slug = classifier.slugify(title);
+  const tags = classifier.extractTags(body);
+  const now = new Date().toISOString();
+  const lines = ['---', 'title: ' + JSON.stringify(title), 'created: ' + now,
+    'folder: ' + (folder ? folder.split('/').pop() : 'Inbox'),
+    'tags: [' + tags.join(', ') + ']'];
+  if (parentId) lines.push('parent: ' + JSON.stringify(parentId));
+  lines.push('---', '', String(body || '').trim(), '');
+  let file = path.join(dir, slug + '.md');
+  let n = 2;
+  while (fs.existsSync(file)) file = path.join(dir, slug + '-' + n++ + '.md');
+  writeFileAtomic(file, lines.join('\n'), 'utf8');
+  return { id: relOf(file), title };
+}
+
+/**
+ * Drop files onto an existing note. Text is appended into the note's body;
+ * anything else is copied to attachments/ and embedded. Optionally each file
+ * also becomes a child note so it shows up in the graph.
+ */
+handle('attach-to-note', (_e, relId, paths, opts) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const file = inVault(relId);
+  const o = opts || {};
+  const dir = path.dirname(file);
+  const attached = [], children = [], skipped = [];
+  let appended = '';
+  touched();
+
+  for (const src of (paths || [])) {
+    let stat;
+    try { stat = fs.statSync(src); } catch { skipped.push({ path: src, why: 'unreadable' }); continue; }
+    if (stat.isDirectory()) { skipped.push({ path: src, why: 'folders are not attached' }); continue; }
+    const ext = path.extname(src).toLowerCase();
+    const base = path.basename(src, ext);
+    try {
+      if (TEXTUAL.has(ext) && !o.asAttachment) {
+        const raw = fs.readFileSync(src, 'utf8');
+        appended += '\n\n## ' + base + '\n\n' + raw.trim() + '\n';
+        attached.push({ name: path.basename(src), kind: 'text' });
+      } else {
+        const att = copyToAttachments(src);
+        appended += '\n\n' + att.markdown + '\n';
+        attached.push({ name: att.name, kind: 'file', rel: att.rel });
+        if (o.alsoChildNotes) children.push(writeNoteFile(dir, base, att.markdown + '\n', relOf(dir), relId));
+      }
+    } catch (err) {
+      log.warn('attach failed for ' + src + ': ', err);
+      skipped.push({ path: src, why: 'attach failed' });
+    }
+  }
+
+  if (appended) {
+    const current = fs.readFileSync(file, 'utf8');
+    writeFileAtomic(file, current.replace(/\s*$/, '') + appended, 'utf8');
+  }
+  log.info('attached ' + attached.length + ' file(s) to ' + relId);
+  return { ok: true, attached, children, skipped };
+});
+
+/**
+ * The Breakdown tab: ingest a file and explode it into its important parts as
+ * linked child notes under a single document node.
+ */
+handle('breakdown-file', (_e, paths, folderId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const folder = folderId == null ? 'Breakdown' : folderId;
+  const dir = folder ? inVault(folder) : path.resolve(settings.vaultPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const docs = [];
+  const skipped = [];
+  touched();
+
+  for (const src of (paths || [])) {
+    let stat;
+    try { stat = fs.statSync(src); } catch { skipped.push({ path: src, why: 'unreadable' }); continue; }
+    if (stat.isDirectory()) { skipped.push({ path: src, why: 'folders cannot be broken down' }); continue; }
+
+    const ext = path.extname(src).toLowerCase();
+    const base = path.basename(src, ext);
+
+    if (!TEXTUAL.has(ext)) {
+      // binary: we can still file it, we just cannot read inside it
+      try {
+        const att = copyToAttachments(src);
+        const parent = writeNoteFile(dir, base, att.markdown + '\n', folder, null);
+        docs.push({ doc: parent, parts: [], note: 'binary file — attached whole' });
+      } catch (err) {
+        log.warn('breakdown attach failed for ' + src + ': ', err);
+        skipped.push({ path: src, why: 'could not attach' });
+      }
+      continue;
+    }
+
+    try {
+      const raw = fs.readFileSync(src, 'utf8');
+      const parts = classifier.breakdown(raw, { limit: 40 });
+      const summary = ['Broken down from `' + path.basename(src) + '`',
+        '', parts.length + ' part' + (parts.length === 1 ? '' : 's') + ' extracted.'].join('\n');
+      const parent = writeNoteFile(dir, base, summary, folder, null);
+      const made = [];
+      for (const p of parts) {
+        const body = p.kind === 'point' || p.kind === 'action' || p.kind === 'highlight'
+          ? p.body + '\n\n#' + p.kind
+          : p.body;
+        made.push(writeNoteFile(dir, p.title, body, folder, parent.id));
+      }
+      docs.push({ doc: parent, parts: made });
+      log.info('broke down ' + path.basename(src) + ' into ' + made.length + ' part(s)');
+    } catch (err) {
+      log.warn('breakdown failed for ' + src + ': ', err);
+      skipped.push({ path: src, why: 'could not read' });
+    }
+  }
+  return { ok: true, docs, skipped, folder: folder || '' };
+});
+
+// ---------- update checking ----------
+// electron-updater only works inside a packaged app. To give an honest answer
+// in both modes we ask the GitHub Releases API ourselves and compare versions;
+// when we *are* packaged, we then hand off to electron-updater to do the work.
+
+const https = require('https');
+const versions = require('./version');
+
+let lastRelease = null;   // remembered so "View release" needs no URL from the renderer
+
+function repoInfo() {
+  try {
+    const pkg = require('./package.json');
+    const pub = (pkg.build && pkg.build.publish && pkg.build.publish[0]) || {};
+    if (pub.provider === 'github' && pub.owner && pub.repo) return { owner: pub.owner, repo: pub.repo };
+  } catch (err) { log.warn('could not read publish config: ', err); }
+  return null;
+}
+
+function fetchJson(url, redirects) {
+  const hops = redirects || 0;
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: { 'User-Agent': 'Synapse-Updater', 'Accept': 'application/vnd.github+json' },
+      timeout: 12000
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && hops < 3) {
+        res.resume();
+        return resolve(fetchJson(res.headers.location, hops + 1));
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        body += c;
+        if (body.length > 2 * 1024 * 1024) { req.destroy(new Error('response too large')); }
+      });
+      res.on('end', () => {
+        if (res.statusCode === 404) return resolve({ __none: true });
+        if (res.statusCode === 403) return reject(new Error('GitHub rate limit reached — try again in a few minutes.'));
+        if (res.statusCode !== 200) return reject(new Error('GitHub returned ' + res.statusCode));
+        try { resolve(JSON.parse(body)); }
+        catch { reject(new Error('Unreadable response from GitHub.')); }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('Timed out contacting GitHub.')));
+    req.on('error', reject);
+  });
+}
+
+handle('check-updates', async () => {
+  const current = app.getVersion();
+  const packaged = app.isPackaged;
+  const repo = repoInfo();
+  if (!repo) return { ok: false, current, packaged, error: 'No GitHub repository is configured in package.json.' };
+
+  let rel;
+  try {
+    rel = await fetchJson('https://api.github.com/repos/' + repo.owner + '/' + repo.repo + '/releases/latest');
+  } catch (err) {
+    log.warn('update check failed: ', err);
+    return { ok: false, current, packaged, error: String(err.message || err) };
+  }
+
+  if (rel.__none) {
+    log.info('update check: no releases published');
+    return { ok: true, current, packaged, status: 'none', latest: null };
+  }
+
+  const latest = versions.clean(rel.tag_name || rel.name || '');
+  const newer = versions.isNewer(latest, current);
+  const assets = rel.assets || [];
+  const hasInstaller = assets.some(a => /\.exe$/i.test(a.name || ''));
+  const hasFeed = assets.some(a => (a.name || '').toLowerCase() === 'latest.yml');
+
+  lastRelease = { url: rel.html_url, version: latest };
+  log.info('update check: running ' + current + ', latest release ' + latest + (newer ? ' (newer)' : ' (up to date)'));
+
+  const result = {
+    ok: true, current, packaged, latest,
+    status: newer ? 'available' : 'current',
+    url: rel.html_url,
+    published: rel.published_at,
+    notes: String(rel.body || '').slice(0, 800),
+    hasInstaller, hasFeed,
+    // an update can only install itself when all three line up
+    canAutoInstall: !!(newer && packaged && hasFeed)
+  };
+
+  if (result.canAutoInstall) {
+    // autoDownload is on, so this kicks off the download; progress arrives on
+    // the existing update-status channel.
+    try { await require('./updater').checkNow(mainWindow); }
+    catch (err) { log.warn('handing off to electron-updater failed: ', err); }
+  }
+  return result;
+});
+
+handle('open-release', () => {
+  if (!lastRelease || !lastRelease.url) return { ok: false };
+  return openExternal(lastRelease.url) ? { ok: true } : { ok: false };
+});
+
+handle('install-update', () => {
+  if (!app.isPackaged) return { ok: false, error: 'Only the installed app can restart into an update.' };
+  try {
+    isQuitting = true;
+    require('./updater').quitAndInstall();
+    return { ok: true };
+  } catch (err) {
+    log.error('quitAndInstall failed: ', err);
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+// Pick arbitrary files (the import dialog is deliberately narrow; this is not).
+handle('pick-files', async (_e, title) => {
+  const r = await dialog.showOpenDialog({
+    title: title || 'Choose files',
+    properties: ['openFile', 'multiSelections']
+  });
+  return (r.canceled ? [] : r.filePaths);
+});
+
+// Paste an image straight out of the clipboard into the vault.
+handle('import-image-buffer', (_e, bytes, name, folderId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  if (!bytes || !bytes.byteLength) return { ok: false, error: 'Clipboard had no image.' };
+  const attachDir = path.join(settings.vaultPath, vault.ATTACH_DIR);
+  fs.mkdirSync(attachDir, { recursive: true });
+  const safe = sanitizeName(name || '', 'pasted') || 'pasted';
+  const ext = path.extname(safe) || '.png';
+  const stem = path.basename(safe, ext) || 'pasted';
+  let dest = path.join(attachDir, stem + '-' + Date.now() + ext);
+  touched();
+  writeFileAtomic(dest, Buffer.from(bytes));
+  const rel = path.posix.join(vault.ATTACH_DIR, path.basename(dest));
+  const folder = folderId == null ? 'Imported' : folderId;
+  const dir = folder ? inVault(folder) : path.resolve(settings.vaultPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const note = writeNoteFile(dir, 'Pasted image', '![' + path.basename(dest) + '](' + rel + ')\n', folder, null);
+  return { ok: true, note, rel };
+});
+
+// ---- ephemeral burner notes ----
+// A note with an `expires:` field deletes itself once that time passes.
+function purgeExpired() {
+  if (!settings.vaultPath) return 0;
+  let removed = 0;
+  const now = Date.now();
+  for (const file of vault.walk(settings.vaultPath)) {
+    try {
+      const { fm } = fmlib.splitFM(fs.readFileSync(file, 'utf8'));
+      if (!fm.expires) continue;
+      const t = Date.parse(String(fm.expires).replace(/^"|"$/g, ''));
+      if (!t || t > now) continue;
+      touched();
+      fs.rmSync(file, { force: true });
+      removed++;
+      log.info('burner note expired: ' + relOf(file));
+    } catch {}
+  }
+  if (removed) {
+    vault.clearCache();
+    for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('vault-changed');
+  }
+  return removed;
+}
+handle('purge-expired', () => ({ removed: purgeExpired() }));
+
+handle('set-note-ttl', (_e, relId, hours) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const file = inVault(relId);
+  const parts = fmlib.splitFM(fs.readFileSync(file, 'utf8'));
+  if (hours == null || hours === 0) {
+    delete parts.fm.expires;
+    parts.order = parts.order.filter(k => k !== 'expires');
+  } else {
+    parts.fm.expires = new Date(Date.now() + Number(hours) * 3600000).toISOString();
+    if (!parts.order.includes('expires')) parts.order.push('expires');
+  }
+  touched();
+  writeFileAtomic(file, fmlib.joinFM(parts), 'utf8');
+  return { ok: true, expires: parts.fm.expires || null };
+});
+
+// Does the vault already have notes? Used to skip the splash screen on launch.
+handle('vault-has-notes', () => {
+  if (!settings.vaultPath) return { hasNotes: false, count: 0 };
+  const n = vault.walk(settings.vaultPath).length;
+  return { hasNotes: n > 0, count: n };
 });
 
 // folders that exist right now (for the re-file picker)

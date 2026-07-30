@@ -136,11 +136,46 @@ function parseNote(content) {
     created: fm.created || null,
     folder: fm.folder || null,
     parent: fm.parent || null,
+    expires: fm.expires || null,
     tags: Array.isArray(fm.tags) ? fm.tags : (fm.tags ? [fm.tags] : []),
     links: extractLinks(body),
     body
   };
 }
+
+/**
+ * Split a Markdown document into sections for the auto-split importer.
+ * Headings start new sections; otherwise blank lines separate them. Returns
+ * [{ title, body }] with the document's own title first if it had one.
+ */
+function splitMarkdown(content, opts) {
+  const o = opts || {};
+  const parsed = parseNote(content);
+  const lines = parsed.body.split(/\r?\n/);
+  const out = [];
+  let cur = null;
+  const flush = () => {
+    if (cur && cur.body.join('\n').trim()) {
+      out.push({ title: cur.title || deriveTitle(cur.body.join(' ')), body: cur.body.join('\n').trim() });
+    }
+    cur = null;
+  };
+
+  const hasHeading = lines.some(l => /^#{1,6}\s+\S/.test(l));
+  for (const line of lines) {
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (hasHeading && h) { flush(); cur = { title: h[2].trim(), body: [] }; continue; }
+    if (!hasHeading && !line.trim()) { flush(); continue; }
+    if (!cur) cur = { title: null, body: [] };
+    cur.body.push(line);
+  }
+  flush();
+
+  const min = o.minChars == null ? 1 : o.minChars;
+  return out.filter(s => s.body.length >= min);
+}
+
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 /**
  * Distinctive words from a thought, for learning filing rules when the user
@@ -164,9 +199,73 @@ function learnableTerms(text, limit) {
   return out;
 }
 
-function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+/**
+ * Pull the *important parts* out of an arbitrary text document.
+ *
+ * Markdown/structured text splits on its own headings. Unstructured prose is
+ * mined for the things people actually want back out of a document: bullet and
+ * numbered list items, lines that look like decisions or actions, and the
+ * densest sentences. Returns [{ title, body, kind }].
+ */
+function breakdown(content, opts) {
+  const o = opts || {};
+  const limit = o.limit || 24;
+  const parsed = parseNote(content);
+  const text = parsed.body;
+
+  // structured document: headings already mark the important parts
+  if (/^#{1,6}\s+\S/m.test(text)) {
+    return splitMarkdown(content, { minChars: 2 })
+      .slice(0, limit)
+      .map(s => ({ title: s.title, body: s.body, kind: 'section' }));
+  }
+
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  const seen = new Set();
+  const push = (title, body, kind) => {
+    const key = (body || '').trim().toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ title: deriveTitle(title || body), body: String(body).trim(), kind });
+  };
+
+  // 1. list items — the most reliable "this mattered enough to enumerate" signal
+  for (const line of lines) {
+    const li = line.match(/^\s*(?:[-*+•]|\d+[.)])\s+(.{4,})$/);
+    if (li) push(li[1], li[1], 'point');
+  }
+
+  // 2. action / decision lines, wherever they appear
+  const CUES = /\b(todo|to-do|action|next step|decision|decided|must|should|deadline|due|owner|risk|blocker|question|follow[- ]up)\b/i;
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.length < 8 || t.length > 400) continue;
+    if (CUES.test(t)) push(t, t, 'action');
+  }
+
+  // 3. only if nothing structured turned up, mine the densest sentences —
+  //    otherwise these would just restate the bullets we already have
+  if (!out.length) {
+    const sentences = text.replace(/\s+/g, ' ').split(/(?<=[.!?])\s+/);
+    const scored = sentences
+      .map(s => s.trim())
+      .filter(s => s.length >= 30 && s.length <= 400)
+      .map(s => ({ s, score: learnableTerms(s, 12).length }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8);
+    for (const { s } of scored) push(s, s, 'highlight');
+  }
+
+  // 4. last resort: paragraphs
+  if (!out.length) {
+    for (const s of splitMarkdown(content, { minChars: 2 })) push(s.title, s.body, 'section');
+  }
+
+  return out.slice(0, limit);
+}
 
 module.exports = {
   classify, extractTags, extractLinks, deriveTitle, slugify,
-  buildNote, parseNote, learnableTerms, STOPWORDS
+  buildNote, parseNote, learnableTerms, splitMarkdown, breakdown, STOPWORDS
 };

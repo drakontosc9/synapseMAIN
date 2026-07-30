@@ -1,14 +1,16 @@
 {
   "name": "synapse",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "A mind-mapping app: capture a thought, it auto-files into a Markdown vault, and you navigate everything through an Obsidian-style graph.",
   "main": "main.js",
   "author": "Ivan",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node test/classifier.test.js && node test/features.test.js && node test/safeio.test.js && node test/vault-async.test.js",
+    "test": "node test/classifier.test.js && node test/features.test.js && node test/safeio.test.js && node test/vault-async.test.js && node test/split.test.js && node test/version.test.js",
     "test:ui": "electron test/ui-smoke.js",
+    "test:ipc": "electron test/ipc-live.js",
+    "test:stress": "electron test/stress.js 2500",
     "dist": "electron-builder --publish never",
     "dist:win": "electron-builder --win --publish never"
   },

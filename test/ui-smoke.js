@@ -171,6 +171,416 @@ app.whenReady().then(async () => {
     'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="deleteNote"})||{}).args)'),
     '["Ideas/old.md"]');
 
+  console.log('\nopen folder in explorer:');
+  await js('window.synapse.__reset()');
+  await js('openFolderInExplorer("Ideas/note.md"); 0');
+  await wait(150);
+  ok('note path forwarded to main', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="openFolder"})||{}).args)'),
+    '["Ideas/note.md"]');
+  await js('window.synapse.__reset()');
+  await js('openFolderInExplorer(""); 0');
+  await wait(150);
+  ok('vault root opens too', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="openFolder"})||{}).args)'),
+    '[""]');
+
+  console.log('\nfolder context menu:');
+  await js('showCtx({x:40,y:40,node:{id:"Ideas",type:"folder",title:"Ideas",folder:"Ideas"}})');
+  await wait(120);
+  const folderMenu = await js('JSON.stringify(Array.prototype.map.call(document.querySelectorAll("#ctxmenu button"),function(b){return b.textContent}))');
+  ok('offers explorer', folderMenu.indexOf('Open in file explorer') >= 0, true);
+  ok('offers rename', folderMenu.indexOf('Rename folder') >= 0, true);
+  ok('offers merge', folderMenu.indexOf('Merge into another folder') >= 0, true);
+  ok('offers colour', folderMenu.indexOf('Change colour') >= 0, true);
+  ok('offers delete', folderMenu.indexOf('Delete folder') >= 0, true);
+  await js('hideCtx()');
+
+  console.log('\nin-graph note creation:');
+  await js('window.synapse.__reset()');
+  await js('openSpawn(400, 300)');
+  await wait(150);
+  ok('spawn box opens', await js('!document.getElementById("spawn").classList.contains("hidden")'), true);
+  ok('input focused', await js('document.activeElement.id'), 'spawnInput');
+  await js('document.getElementById("spawnInput").value = "thought from the canvas"');
+  await js('commitSpawn(); 0');
+  await wait(300);
+  ok('createNote called with text', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="createNote"})||{}).args[0])'),
+    '"thought from the canvas"');
+  ok('spawn box closed', await js('document.getElementById("spawn").classList.contains("hidden")'), true);
+
+  console.log('\nburner notes:');
+  await js('window.synapse.__reset()');
+  await js('openSpawn(400, 300)');
+  await wait(120);
+  await js('document.getElementById("spawnInput").value = "temporary"');
+  await js('document.getElementById("spawnBurner").checked = true');
+  await js('document.getElementById("spawnTtl").value = "1"');
+  await js('commitSpawn(); 0');
+  await wait(300);
+  ok('ttl passed through', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="createNote"})||{}).args[2])'),
+    '{"ttlHours":1}');
+
+  console.log('\nlens engine:');
+  await js('graph.setData({folders:["Ideas"],nodes:[' +
+    '{id:"__root__",type:"root",title:"Vault",containerId:null},' +
+    '{id:"Ideas",type:"folder",title:"Ideas",containerId:"__root__",folder:"Ideas",noteCount:3},' +
+    '{id:"Ideas/a.md",type:"note",title:"A",containerId:"Ideas",folder:"Ideas",tags:[],links:[],created:"2026-07-01T00:00:00.000Z",mass:400},' +
+    '{id:"Ideas/b.md",type:"note",title:"B",containerId:"Ideas",folder:"Ideas",tags:[],links:[],created:"2026-07-20T00:00:00.000Z",mass:20},' +
+    '{id:"Ideas/c.md",type:"note",title:"C",containerId:"Ideas",folder:"Ideas",tags:[],links:[],created:"2026-07-28T00:00:00.000Z",mass:900,parentNote:"Ideas/a.md"}' +
+    '],links:[{source:"Ideas/a.md",target:"Ideas/c.md",type:"parent"}],suggestions:[]})');
+  await wait(100);
+  ok('mass affects radius', await js(
+    'graph.map.get("Ideas/c.md").r > graph.map.get("Ideas/b.md").r'), true);
+
+  await js('setLens("mind")');
+  await wait(120);
+  ok('lens targets assigned', await js('graph.lensTargets && graph.lensTargets.size'), 3);
+  ok('notes visible regardless of zoom', await js('graph._nodeAlpha(graph.map.get("Ideas/a.md"), new Map())'), 1);
+  ok('folders dissolve under a lens', await js('graph._nodeAlpha(graph.map.get("Ideas"), new Map())'), 0);
+  ok('newest note lands nearer the centre', await js(
+    '(function(){var t=graph.lensTargets,cx=graph.canvas.clientWidth/2,cy=graph.canvas.clientHeight/2;' +
+    'function d(id){var p=t.get(id);return Math.hypot(p.x-cx,p.y-cy)}' +
+    'return d("Ideas/c.md") < d("Ideas/a.md")})()'), true);
+  ok('ghost traces recorded', await js('graph.lensGhosts.length'), 3);
+
+  await js('setLens("skills")');
+  await wait(120);
+  ok('skills lens lays out rows', await js('graph.lensTargets.size'), 3);
+  ok('child sits below its prerequisite', await js(
+    'graph.lensTargets.get("Ideas/c.md").y > graph.lensTargets.get("Ideas/a.md").y'), true);
+
+  await js('setLens("knowledge")');
+  await wait(120);
+  ok('knowledge lens clusters', await js('graph.lensTargets.size'), 3);
+
+  await js('setLens("free")');
+  await wait(120);
+  ok('free lens releases targets', await js('graph.lensTargets === null'), true);
+  ok('folders come back', await js('graph._nodeAlpha(graph.map.get("Ideas"), new Map()) > 0'), true);
+
+  console.log('\nflare:');
+  await js('graph.flare("Ideas/a.md")');
+  ok('flare reaches linked notes', await js('graph._flare.ids.has("Ideas/c.md")'), true);
+  ok('flare records the origin at hop 0', await js('graph._flare.ids.get("Ideas/a.md")'), 0);
+
+  console.log('\ncollision tagging (drop a note on a folder):');
+  await js('window.synapse.__reset()');
+  await js('dropInFolder("Ideas/b.md", "Ideas"); 0');
+  await wait(250);
+  ok('moveNote called with the folder', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="moveNote"})||{}).args)'),
+    '["Ideas/b.md","Ideas"]');
+
+  console.log('\nmarquee multi-select:');
+  // dropInFolder above triggered a refresh against the stub's empty vault, so
+  // re-seed before asserting on selection
+  await js('graph.setData({folders:["Ideas"],nodes:[' +
+    '{id:"__root__",type:"root",title:"Vault",containerId:null},' +
+    '{id:"Ideas",type:"folder",title:"Ideas",containerId:"__root__",folder:"Ideas",noteCount:3},' +
+    '{id:"Ideas/a.md",type:"note",title:"A",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10},' +
+    '{id:"Ideas/b.md",type:"note",title:"B",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10},' +
+    '{id:"Ideas/c.md",type:"note",title:"C",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10}' +
+    '],links:[],suggestions:[]})');
+  await wait(100);
+  ok('selectAllVisible picks up notes', await js(
+    '(function(){graph.clearSelection();graph.selectAllVisible();return graph.getSelection().length})()'), 3);
+  ok('clearSelection empties it', await js(
+    '(function(){graph.clearSelection();return graph.getSelection().length})()'), 0);
+
+  console.log('\ndrag-and-drop import:');
+  await js('window.synapse.__reset()');
+  await js('importDropped(["C:/tmp/a.txt","C:/tmp/b.png"]); 0');
+  await wait(300);
+  ok('non-markdown imports without a prompt', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="importPaths"})||{}).args[0])'),
+    '["C:/tmp/a.txt","C:/tmp/b.png"]');
+
+  // File objects must never cross the context bridge — the preload hands the
+  // renderer plain paths through this callback instead.
+  ok('renderer registered a drop callback', await js('window.synapse.__hasDropCb()'), true);
+  await js('window.synapse.__reset()');
+  await js('window.synapse.__fireDrop({paths:["C:/tmp/dropped.txt"],x:5,y:9999,count:1}); 0');
+  await wait(350);
+  ok('callback paths reach the importer', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="importPaths"})||{}).args[0])'),
+    '["C:/tmp/dropped.txt"]');
+  await js('window.synapse.__reset()');
+  await js('window.synapse.__fireDrop({paths:[],x:5,y:9999,count:2}); 0');
+  await wait(250);
+  ok('unreadable drop imports nothing', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="importPaths"}).length'), 0);
+
+  console.log('\nhidden panes must not render:');
+  ok('pane B is inactive while split is off', await js('panes.b._active'), false);
+  ok('pane B stops looping', await js(
+    '(function(){var n=0;var o=panes.b._tick.bind(panes.b);panes.b._tick=function(){n++;return o()};' +
+    'window.__pbCount=function(){return n};return 1})()'), 1);
+  await wait(600);
+  ok('no frames drawn by the hidden pane', await js('window.__pbCount()'), 0);
+  ok('dpr is defined even when never laid out', await js('typeof panes.b.dpr'), 'number');
+  ok('active pane has a real dpr', await js('panes.a.dpr > 0'), true);
+
+  console.log('\ncapture: Enter must never insert a newline:');
+  await js('window.synapse.__reset()');
+  const fireCapture = (props) => js(
+    '(function(){var t=document.getElementById("thought");' +
+    'var e=new KeyboardEvent("keydown",Object.assign({key:"Enter",bubbles:true,cancelable:true},' + JSON.stringify(props || {}) + '));' +
+    'Object.defineProperty(e,"target",{value:t});' +
+    't.dispatchEvent(e);return e.defaultPrevented})()');
+
+  await js('document.getElementById("thought").value = "a real thought"');
+  ok('plain Enter is swallowed', await fireCapture(), true);
+  await wait(300);
+  ok('and it captured', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="captureThought"})||{}).args)'),
+    '["a real thought"]');
+
+  await js('window.synapse.__reset()');
+  await js('document.getElementById("thought").value = "shift stays a newline"');
+  ok('Shift+Enter is left alone', await fireCapture({ shiftKey: true }), false);
+  ok('Shift+Enter does not capture', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="captureThought"}).length'), 0);
+
+  await js('document.getElementById("thought").value = "   "');
+  ok('whitespace-only Enter still swallowed', await fireCapture(), true);
+  ok('and captures nothing', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="captureThought"}).length'), 0);
+
+  // the two paths that used to leak a newline through
+  await js('document.getElementById("thought").value = "mid ime"');
+  ok('IME composition is swallowed, not captured', await fireCapture({ keyCode: 229 }), false);
+  ok('IME does not capture', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="captureThought"}).length'), 0);
+  ok('numpad Enter (keyCode 13, no key) is swallowed', await js(
+    '(function(){var t=document.getElementById("thought");t.value="numpad";' +
+    'var e=new KeyboardEvent("keydown",{bubbles:true,cancelable:true});' +
+    'Object.defineProperty(e,"keyCode",{value:13});' +
+    'Object.defineProperty(e,"target",{value:t});' +
+    't.dispatchEvent(e);return e.defaultPrevented})()'), true);
+  await wait(250);
+
+  await js('window.synapse.__reset()');
+  await js('document.getElementById("thought").value = "double fire"');
+  await js('capturing = true');                      // simulate a capture in flight
+  ok('re-entrant Enter is swallowed', await fireCapture(), true);
+  ok('but does not double-submit', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="captureThought"}).length'), 0);
+  await js('capturing = false');
+
+  console.log('\nworkspace tabs:');
+  await js('window.synapse.__reset()');
+  await js('lastScan = {folders:["Ideas","Sub"],suggestions:[],links:[' +
+    '{source:"Ideas/a.md",target:"Ideas/Sub/c.md",type:"wikilink"},' +
+    '{source:"Ideas/a.md",target:"Tasks/t.md",type:"wikilink"}],nodes:[' +
+    '{id:"__root__",type:"root",title:"Vault",containerId:null,noteCount:3},' +
+    '{id:"Ideas",type:"folder",title:"Ideas",containerId:"__root__",folder:"Ideas",noteCount:2},' +
+    '{id:"Ideas/Sub",type:"folder",title:"Sub",containerId:"Ideas",folder:"Sub",noteCount:1},' +
+    '{id:"Tasks",type:"folder",title:"Tasks",containerId:"__root__",folder:"Tasks",noteCount:1},' +
+    '{id:"Ideas/a.md",type:"note",title:"A",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10},' +
+    '{id:"Ideas/Sub/c.md",type:"note",title:"C",containerId:"Ideas/Sub",folder:"Sub",tags:[],links:[],mass:10},' +
+    '{id:"Tasks/t.md",type:"note",title:"T",containerId:"Tasks",folder:"Tasks",tags:[],links:[],mass:10}' +
+    ']}');
+  // stash it: several flows call refresh(), which reloads from the stub's empty
+  // vault and wipes both lastScan and the graph
+  await js('window.__fx = lastScan; graph.setData(lastScan)');
+  await wait(100);
+
+  ok('master tab exists and is pinned', await js('tabs[0].pinned === true && tabs[0].scopeId === ""'), true);
+
+  // scoping
+  ok('unscoped data passes through whole', await js('scopeData(lastScan,"").nodes.length'), 7);
+  ok('scoped to Ideas keeps its subtree', await js(
+    'scopeData(lastScan,"Ideas").nodes.map(function(n){return n.id}).sort().join(",")'),
+    'Ideas,Ideas/Sub,Ideas/Sub/c.md,Ideas/a.md,__root__');
+  ok('scoped view excludes other folders', await js(
+    'scopeData(lastScan,"Ideas").nodes.some(function(n){return n.id==="Tasks/t.md"})'), false);
+  ok('scope folder re-parents onto the root', await js(
+    'scopeData(lastScan,"Ideas").nodes.find(function(n){return n.id==="Ideas"}).containerId'), '__root__');
+  ok('links crossing the scope are dropped', await js('scopeData(lastScan,"Ideas").links.length'), 1);
+  ok('root note count is rescoped', await js(
+    'scopeData(lastScan,"Ideas").nodes.find(function(n){return n.type==="root"}).noteCount'), 2);
+  ok('a missing scope is reported', await js('scopeData(lastScan,"Ghost").missing'), true);
+
+  // spawning
+  // the default set is Master + the pinned Breakdown tab, so a new scope tab is the third
+  const baseTabs = await js('tabs.length');
+  await js('openTabForNode(graph.map.get("Ideas") || {id:"Ideas",type:"folder",title:"Ideas"})');
+  await wait(200);
+  ok('a scope tab was added', await js('tabs.length'), baseTabs + 1);
+  ok('it is scoped to the folder', await js(
+    'tabs.filter(function(t){return t.scopeId==="Ideas"}).length'), 1);
+  ok('and became active', await js(
+    'activeTabId === tabs.find(function(t){return t.scopeId==="Ideas"}).id'), true);
+  ok('tab chips rendered', await js('document.querySelectorAll("#tabs .wtab").length'), baseTabs + 1);
+  ok('active chip marked', await js(
+    'document.querySelector("#tabs .wtab.active").dataset.tab === tabs.find(function(t){return t.scopeId==="Ideas"}).id'), true);
+
+  ok('re-opening the same folder reuses its tab', await js(
+    '(function(){openTabForNode({id:"Ideas",type:"folder",title:"Ideas"});return tabs.length})()'), baseTabs + 1);
+
+  // split view
+  await js('toggleSplit()');
+  await wait(200);
+  ok('split turns the second pane on', await js(
+    '!document.getElementById("paneB").classList.contains("hidden")'), true);
+  ok('split tab is set', await js('splitTabId !== null'), true);
+  ok('panes container marked split', await js(
+    'document.querySelector(".panes").classList.contains("split")'), true);
+  ok('pane B has its own graph instance', await js('panes.b !== panes.a && !!panes.b'), true);
+  ok('badges name each pane', await js('document.getElementById("badgeB").textContent.length > 0'), true);
+
+  await js('focusPane("b")');
+  ok('focusing a pane repoints the active graph', await js('graph === panes.b'), true);
+  await js('focusPane("a")');
+
+  await js('toggleSplit()');
+  await wait(150);
+  ok('split toggles back off', await js('splitTabId === null'), true);
+  ok('pane B hidden again', await js(
+    'document.getElementById("paneB").classList.contains("hidden")'), true);
+
+  // cross-tab routing
+  console.log('\ncross-tab routing:');
+  // route from the Master tab — a scoped tab legitimately cannot see notes
+  // outside its own subtree
+  await js('activateTab(tabs[0].id)');
+  await wait(200);
+  ok('master tab sees the whole vault', await js('!!graph.map.get("Tasks/t.md")'), true);
+  await js('window.synapse.__reset()');
+  const barBox = await js('JSON.stringify(document.getElementById("tabbar").getBoundingClientRect())');
+  const bar = JSON.parse(barBox);
+  const chip = JSON.parse(await js(
+    'JSON.stringify(document.querySelector(\'#tabs .wtab[data-tab="\' + ' +
+    'tabs.find(function(t){return t.scopeId==="Ideas"}).id + \'"]\').getBoundingClientRect())'));
+  ok('drop over a tab chip is consumed', await js(
+    'onDropOutside("Tasks/t.md",' + (chip.left + chip.width / 2) + ',' + (chip.top + chip.height / 2) + ')'), true);
+  await wait(300);
+  ok('routed note moved into that tab folder', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="moveNote"})||{}).args)'),
+    '["Tasks/t.md","Ideas"]');
+  ok('drop far below the bar is not consumed', await js(
+    'onDropOutside("Tasks/t.md",' + (chip.left + 5) + ',' + (bar.bottom + 400) + ')'), false);
+
+  console.log('\nbreakdown tab + file drop routing:');
+  ok('breakdown tab exists and is pinned', await js(
+    '(function(){var t=tabs.find(function(x){return x.kind==="ingest"});return !!t && t.pinned})()'), true);
+  ok('its chip is styled as an ingest tab', await js(
+    '!!document.querySelector("#tabs .wtab.ingest")'), true);
+
+  // drop onto a note => attach
+  await js('window.synapse.__reset()');
+  await js('activateTab(tabs[0].id)');
+  await wait(150);
+  // routeDroppedNode above called refresh(), which reloads from the stub's empty
+  // vault — put the fixture back before asking where nodes are on screen
+  await js('lastScan = window.__fx; graph.setData(lastScan)');
+  await wait(200);
+  ok('fixture note is back in the graph', await js('!!graph.map.get("Ideas/a.md")'), true);
+  // pin the camera and park the node so the hit-test is deterministic
+  // (physics and earlier lens/camera moves otherwise put it anywhere)
+  // k must be high enough that the containing folder counts as "open", or the
+  // note is legitimately invisible and therefore not hit-testable
+  await js('(function(){graph.transform={x:0,y:0,k:2};graph.anim=null;graph.alpha=0;' +
+    'var f=graph.map.get("Ideas");f.x=150;f.y=150;f.vx=0;f.vy=0;' +
+    'var n=graph.map.get("Ideas/a.md");n.x=150;n.y=150;n.vx=0;n.vy=0;n.r=14;return 1})()');
+  await wait(120);
+  ok('the note is visible at this zoom', await js(
+    'graph._nodeAlpha(graph.map.get("Ideas/a.md"), new Map()) > 0.02'), true);
+
+  // the simulation keeps moving nodes, so locate and hit-test in one evaluation
+  const screenOf = (id) =>
+    '(function(){var n=graph.map.get("' + id + '");var r=graph.canvas.getBoundingClientRect();' +
+    'var t=graph.transform;return {x:r.left+n.x*t.k+t.x,y:r.top+n.y*t.k+t.y}})()';
+  ok('a note is the drop target under the cursor', await js(
+    '(function(){var p=' + screenOf('Ideas/a.md') + ';return dropTargetAt(p.x,p.y).kind})()'), 'note');
+  await js('(function(){var p=' + screenOf('Ideas/a.md') + ';routeDroppedFiles(["C:/tmp/spec.txt"],p.x,p.y)})(); 0');
+  await wait(350);
+  ok('files attach to the note under the cursor', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="attachToNote"})||{}).args.slice(0,2))'),
+    '["Ideas/a.md",["C:/tmp/spec.txt"]]');
+
+  // drop onto the breakdown tab chip => breakdown
+  await js('window.synapse.__reset()');
+  const ingestChip = JSON.parse(await js(
+    'JSON.stringify(document.querySelector("#tabs .wtab.ingest").getBoundingClientRect())'));
+  ok('the ingest chip is recognised as a drop target', await js(
+    'dropTargetAt(' + (ingestChip.left + ingestChip.width / 2) + ',' + (ingestChip.top + ingestChip.height / 2) + ').tab.kind'), 'ingest');
+  await js('routeDroppedFiles(["C:/tmp/report.txt"],' +
+    (ingestChip.left + ingestChip.width / 2) + ',' + (ingestChip.top + ingestChip.height / 2) + '); 0');
+  await wait(400);
+  ok('dropping on it breaks the file down', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="breakdownFile"})||{}).args)'),
+    '[["C:/tmp/report.txt"],"Breakdown"]');
+  ok('it does not fall through to a plain import', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="importPaths"}).length'), 0);
+
+  // with the breakdown tab active, any drop is broken down
+  await js('window.synapse.__reset()');
+  await js('activateTab(tabs.find(function(t){return t.kind==="ingest"}).id)');
+  await wait(200);
+  await js('routeDroppedFiles(["C:/tmp/loose.txt"], 5, 9999); 0');
+  await wait(400);
+  ok('active breakdown tab claims loose drops', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="breakdownFile"}).length'), 1);
+
+  await js('activateTab(tabs[0].id)');
+  await wait(150);
+
+  // pruning
+  console.log('\ntab pruning:');
+  await js('lastScan = {folders:[],links:[],suggestions:[],nodes:[{id:"__root__",type:"root",title:"Vault",containerId:null}]}');
+  await js('pruneTabs()');
+  await wait(150);
+  ok('tab for a vanished folder is closed', await js(
+    'tabs.filter(function(t){return t.scopeId==="Ideas"}).length'), 0);
+  ok('pinned tabs survive', await js('tabs.every(function(t){return t.pinned})'), true);
+  ok('master survives', await js('!!tabs.find(function(t){return t.id==="master"})'), true);
+  ok('breakdown survives', await js('!!tabs.find(function(t){return t.kind==="ingest"})'), true);
+  ok('active falls back to a surviving tab', await js('!!tabs.find(function(t){return t.id===activeTabId})'), true);
+
+  console.log('\ncheck for updates button:');
+  await js('window.synapse.__reset()');
+  await js('openSettings(); selectSettingsTab("help"); 0');
+  await wait(150);
+  ok('button exists on the help panel', await js('!!document.getElementById("checkUpdatesBtn")'), true);
+  await js('document.getElementById("checkUpdatesBtn").click()');
+  await wait(400);
+  ok('it asked main to check', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="checkUpdates"}).length'), 1);
+  ok('an available update is announced', await js(
+    'document.getElementById("updateStatus").textContent.indexOf("0.4.0") >= 0'), true);
+  ok('it says what you are running', await js(
+    'document.getElementById("updateStatus").textContent.indexOf("0.3.2") >= 0'), true);
+  ok('release age shown', await js(
+    'document.getElementById("updateStatus").textContent.indexOf("2 days ago") >= 0'), true);
+  ok('source builds are told to git pull', await js(
+    'document.getElementById("updateStatus").textContent.indexOf("git pull") >= 0'), true);
+  ok('release notes rendered', await js(
+    'document.getElementById("updateNotes").textContent'), 'Adds the lens engine.');
+  ok('view-release button revealed', await js(
+    '!document.getElementById("openReleaseBtn").classList.contains("hidden")'), true);
+  ok('install button stays hidden until a download is ready', await js(
+    'document.getElementById("installUpdateBtn").classList.contains("hidden")'), true);
+
+  await js('document.getElementById("openReleaseBtn").click()');
+  await wait(200);
+  ok('view release opens it via main', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="openRelease"}).length'), 1);
+
+  // a downloaded update reveals the restart button
+  await js('window.synapse.__fireUpdate({state:"ready",version:"0.4.0"}); 0');
+  await wait(200);
+  ok('restart button appears when ready', await js(
+    '!document.getElementById("installUpdateBtn").classList.contains("hidden")'), true);
+  await js('document.getElementById("installUpdateBtn").click()');
+  await wait(200);
+  ok('restart asks main to install', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="installUpdate"}).length'), 1);
+  await js('closeSettings(); 0');
+
   console.log('\nquick capture window:');
   const qwin = new BrowserWindow({
     show: false,

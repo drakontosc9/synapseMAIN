@@ -34,6 +34,12 @@ jobs:
       - name: Run UI smoke test (real renderer in Electron)
         run: npm run test:ui
 
+      - name: Run live IPC test (real main process, throwaway vault)
+        run: npm run test:ipc
+
+      - name: Stress the renderer (2500 notes, lenses, split panes)
+        run: npm run test:stress
+
       - name: Build Windows installer (NSIS) + portable zip
         run: npm run dist:win
 
