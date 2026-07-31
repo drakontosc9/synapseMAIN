@@ -299,10 +299,14 @@ app.whenReady().then(async () => {
     truthy('responds', !!r);
     ok('reports the running version', r.current, app.getVersion());
     ok('knows it is not a packaged build', r.packaged, false);
+    // the packaged app has no build.publish; resolution must never depend on it
+    truthy('never fails for want of a configured repo',
+      !(r.error || '').match(/No GitHub repository/i));
     if (r.ok) {
       truthy('status is one of none/current/available',
         ['none', 'current', 'available'].indexOf(r.status) >= 0);
       if (r.status !== 'none') {
+        ok('names the repo it checked', r.repo, 'drakontosc9/synapseMAIN');
         truthy('returns a latest version string', typeof r.latest === 'string' && r.latest.length > 0);
         truthy('returns a release url', /^https:\/\/github\.com\//.test(r.url || ''));
         ok('never auto-installs from a dev build', r.canAutoInstall, false);

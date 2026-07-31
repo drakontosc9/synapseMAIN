@@ -1280,12 +1280,12 @@ const versions = require('./version');
 let lastRelease = null;   // remembered so "View release" needs no URL from the renderer
 
 function repoInfo() {
-  try {
-    const pkg = require('./package.json');
-    const pub = (pkg.build && pkg.build.publish && pkg.build.publish[0]) || {};
-    if (pub.provider === 'github' && pub.owner && pub.repo) return { owner: pub.owner, repo: pub.repo };
-  } catch (err) { log.warn('could not read publish config: ', err); }
-  return null;
+  let pkg = {};
+  try { pkg = require('./package.json'); }
+  catch (err) { log.warn('could not read package.json: ', err); }
+  const r = require('./repo').resolveRepo(pkg);
+  if (!repoInfo._logged) { log.info('update source: ' + r.owner + '/' + r.repo + ' (via ' + r.source + ')'); repoInfo._logged = true; }
+  return r;
 }
 
 function fetchJson(url, redirects) {
@@ -1321,8 +1321,7 @@ function fetchJson(url, redirects) {
 handle('check-updates', async () => {
   const current = app.getVersion();
   const packaged = app.isPackaged;
-  const repo = repoInfo();
-  if (!repo) return { ok: false, current, packaged, error: 'No GitHub repository is configured in package.json.' };
+  const repo = repoInfo();   // always resolves — worst case, the compiled-in constant
 
   let rel;
   try {
@@ -1348,6 +1347,7 @@ handle('check-updates', async () => {
 
   const result = {
     ok: true, current, packaged, latest,
+    repo: repo.owner + '/' + repo.repo,
     status: newer ? 'available' : 'current',
     url: rel.html_url,
     published: rel.published_at,

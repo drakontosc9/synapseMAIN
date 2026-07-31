@@ -1939,14 +1939,16 @@ async function checkForUpdates() {
     n.classList.remove('hidden');
   }
 
+  const from = r.repo ? ' <span class="update-repo">· ' + escapeHtml(r.repo) + '</span>' : '';
+
   if (r.status === 'current') {
-    setUpdateStatus('You are up to date — <b>' + escapeHtml(r.current) + '</b> is the latest release.', 'ok');
+    setUpdateStatus('You are up to date — <b>' + escapeHtml(r.current) + '</b> is the latest release.' + from, 'ok');
     return;
   }
 
   // an update exists
   const head = 'Version <b>' + escapeHtml(r.latest) + '</b> is available (released ' +
-    escapeHtml(relDate(r.published)) + '). You have <b>' + escapeHtml(r.current) + '</b>.';
+    escapeHtml(relDate(r.published)) + '). You have <b>' + escapeHtml(r.current) + '</b>.' + from;
 
   if (r.canAutoInstall) {
     setUpdateStatus(head + '<br>Downloading it now — you will be asked to restart when it is ready.', 'new');
