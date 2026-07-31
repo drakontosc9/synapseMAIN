@@ -136,6 +136,37 @@ your workspaces travel with your notes.
 Tabs whose folder is renamed or deleted elsewhere close themselves rather than lingering
 as dead views.
 
+### Drop a folder, get its map
+
+Drag a directory onto the window and its **structure becomes the graph**. Every folder is a
+bubble, every file is a note inside it, nesting preserved to the leaf — a project arrives
+already organised the way you organised it.
+
+```
+lab2a/                          lab2a
+  empire/                        ├── empire
+    characters/                  │    ├── characters   vader · emperor · bobafett
+      vader.txt                  │    └── vehicles     atat · at-st
+      emperor.txt        ->      ├── planets           hoth · endor
+    vehicles/                    └── rebellion
+      atat.txt                        ├── characters   luke · leia
+  planets/                            └── droids       r2 · c3p0
+  rebellion/ ...
+```
+
+Before anything is written you are shown what will happen — folder count, file count, how
+many are readable versus attached, total size, and what is being skipped. Then you choose
+where it lands, whether each text file is also broken into its parts, whether unreadable
+files are attached or skipped, and whether every folder gets its own linkable note.
+
+- **Kept:** empty folders (they are still part of the shape).
+- **Skipped:** `node_modules`, `.git`, `dist`, `venv`, `target` and friends, plus hidden files.
+- **Limits:** 2000 files, 12 levels deep, 256 MB per import, 64 MB per file.
+- Importing the same folder twice makes a second copy rather than merging into the first.
+
+Also available from the command palette — *Import a folder as a graph…* — if you would
+rather pick than drag.
+
 ### The Breakdown tab
 
 A pinned tab with an opinion: **anything you drop on it gets torn into its important parts.**

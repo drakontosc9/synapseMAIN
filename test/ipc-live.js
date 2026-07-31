@@ -263,6 +263,72 @@ app.whenReady().then(async () => {
     ok('missing file is skipped, not fatal', gone.skipped.length, 1);
   }
 
+  console.log('\nimport-tree (folder becomes graph):');
+  {
+    // the shape from the feature request
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), 'srctree-'));
+    const put = (rel, body) => {
+      const full = path.join(src, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      // two headings, so split mode has something real to break apart
+      fs.writeFileSync(full, body == null
+        ? ['# ' + path.basename(rel), 'first section body', '', '# Details', 'second section body'].join('\n')
+        : body);
+    };
+    put('lab2a/empire/characters/vader.txt');
+    put('lab2a/empire/characters/emperor.txt');
+    put('lab2a/empire/vehicles/atat.txt');
+    put('lab2a/planets/hoth.txt');
+    put('lab2a/rebellion/characters/luke.txt');
+    put('lab2a/rebellion/droids/r2.txt');
+    put('lab10/find1.txt');
+    put('node_modules/junk/x.js', 'skip');
+    fs.mkdirSync(path.join(src, 'gxhi-3zig'), { recursive: true });
+
+    const plan = await invoke('scan-tree', [src], {});
+    ok('planning finds one tree', plan.plans.length, 1);
+    truthy('and counts its folders', plan.plans[0].summary.folders >= 8);
+
+    const r = await invoke('import-tree', [src], { folder: 'Imported', split: false });
+    ok('import succeeded', r.ok, true);
+    const res = r.results[0];
+    truthy('folders created', res.folders >= 8);
+    ok('one note per file', res.notes, 7);
+
+    // the structure must survive onto disk
+    const base = rel(res.root);
+    truthy('nested folder exists', fs.existsSync(path.join(base, 'lab2a', 'empire', 'characters')));
+    truthy('leaf note exists', fs.existsSync(path.join(base, 'lab2a', 'empire', 'characters', 'vader.md')));
+    truthy('sibling branch exists', fs.existsSync(path.join(base, 'lab2a', 'rebellion', 'droids', 'r2.md')));
+    truthy('empty folder kept', fs.existsSync(path.join(base, 'gxhi-3zig')));
+    truthy('node_modules not imported', !fs.existsSync(path.join(base, 'node_modules')));
+
+    // and the graph model must reflect it
+    const m = await invoke('scan-vault');
+    const ids = new Set(m.nodes.map(n => n.id));
+    const R = res.root;
+    truthy('root bubble', ids.has(R));
+    truthy('mid-level bubble', ids.has(R + '/lab2a/empire'));
+    truthy('leaf bubble', ids.has(R + '/lab2a/empire/characters'));
+    truthy('note sits inside its folder', ids.has(R + '/lab2a/empire/characters/vader.md'));
+
+    const vader = m.nodes.find(n => n.id === R + '/lab2a/empire/characters/vader.md');
+    ok('note containerId is its folder', vader.containerId, R + '/lab2a/empire/characters');
+    ok('and its effective parent is that folder', vader.effectiveParent, R + '/lab2a/empire/characters');
+    const chars = m.nodes.find(n => n.id === R + '/lab2a/empire/characters');
+    ok('sub-folder parents to its parent folder', chars.effectiveParent, R + '/lab2a/empire');
+
+    // importing the same tree twice must not merge into the first
+    const again = await invoke('import-tree', [src], { folder: 'Imported', split: false });
+    truthy('a second import gets its own root', again.results[0].root !== res.root);
+
+    // splitting turns each file into a document plus parts
+    const r3 = await invoke('import-tree', [src], { folder: 'Imported', split: true });
+    truthy('split mode produces parts', r3.results[0].parts > 0);
+
+    fs.rmSync(src, { recursive: true, force: true });
+  }
+
   console.log('\nburner expiry:');
   {
     writeNote('Concepts/dead.md', 'Expired', 'gone soon', { expires: '2000-01-01T00:00:00.000Z' });

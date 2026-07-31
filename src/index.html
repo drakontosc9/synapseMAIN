@@ -245,8 +245,41 @@
 
         <div class="tabpage hidden" data-page="breakdown">
           <div class="setting-desc">
-            The <b>Breakdown</b> tab takes a file apart into linked notes instead of dropping it
-            in whole. Drop a file on its chip, or drop anything while that tab is open.
+            Breakdown turns documents into map. Drop a <b>file</b> and it is taken apart into
+            linked notes; drop a <b>folder</b> and its whole structure becomes the graph.
+          </div>
+
+          <div class="setting">
+            <div class="setting-label">Dropping a folder</div>
+            <div class="setting-desc">
+              The directory tree <i>is</i> the map. Every folder becomes a bubble, every file
+              becomes a note inside it, and nesting is preserved all the way to the leaves —
+              so a project folder arrives already organised the way you organised it.
+            </div>
+            <div class="guide-tree">lab2a/
+  empire/
+    characters/   vader · emperor · bobafett
+    vehicles/     atat · at-st
+  planets/        hoth · endor
+  rebellion/
+    characters/   luke · leia
+    droids/       r2 · c3p0</div>
+            <div class="setting-desc" style="margin-top:8px">
+              You are shown the count, the size and what will be skipped <b>before</b> anything
+              is written. Empty folders are kept, because they are still part of the shape.
+              Build and system folders (<code>node_modules</code>, <code>.git</code>,
+              <code>dist</code>, <code>venv</code>…) and hidden files are left out.
+            </div>
+            <ul class="guide-list">
+              <li>Up to <b>2000 files</b>, <b>12 levels</b> deep, <b>256 MB</b> per import.</li>
+              <li>Optionally break every text file into its parts at the same time — that
+                  multiplies the note count, so it is off by default.</li>
+              <li>Importing the same folder twice creates a second copy rather than merging.</li>
+            </ul>
+          </div>
+
+          <div class="setting">
+            <div class="setting-label">Dropping a single file</div>
           </div>
 
           <div class="setting">

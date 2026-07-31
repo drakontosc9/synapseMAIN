@@ -79,6 +79,9 @@ contextBridge.exposeInMainWorld('synapse', {
   attachToNote:   (relId, paths, opts) => ipcRenderer.invoke('attach-to-note', relId, paths, opts),
   breakdownFile:  (paths, folderId) => ipcRenderer.invoke('breakdown-file', paths, folderId),
   pickFiles:      (title)        => ipcRenderer.invoke('pick-files', title),
+  pickFolder:     (title)        => ipcRenderer.invoke('pick-folder', title),
+  scanTree:       (paths, opts)  => ipcRenderer.invoke('scan-tree', paths, opts),
+  importTree:     (paths, opts)  => ipcRenderer.invoke('import-tree', paths, opts),
   // Register the one callback that receives dropped file paths.
   onFilesDropped: (cb) => { dropHandler = (typeof cb === 'function') ? cb : null; },
 
@@ -128,5 +131,6 @@ contextBridge.exposeInMainWorld('synapse', {
   onMenuAction:     on('menu-action'),
   onVaultChanged:   on('vault-changed'),
   onShortcutFailed: on('shortcut-failed'),
-  onQuickReset:     on('quick-reset')
+  onQuickReset:     on('quick-reset'),
+  onImportProgress: on('import-progress')
 });

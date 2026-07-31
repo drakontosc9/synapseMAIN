@@ -552,6 +552,46 @@ app.whenReady().then(async () => {
   ok('breakdown survives', await js('!!tabs.find(function(t){return t.kind==="ingest"})'), true);
   ok('active falls back to a surviving tab', await js('!!tabs.find(function(t){return t.id===activeTabId})'), true);
 
+  console.log('\ndropping a folder imports it as a graph:');
+  await js('window.synapse.__reset()');
+  // no folders in the drop -> ordinary file import, no tree dialog
+  await js('routeDroppedFiles(["C:/tmp/plain.txt"], 5, 9999); 0');
+  await wait(350);
+  ok('a plain file drop still imports normally', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="importPaths"}).length'), 1);
+  ok('and does not import a tree', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="importTree"}).length'), 0);
+
+  // now make scanTree report a folder, as it would for a real directory drop
+  await js('window.synapse.__reset()');
+  await js('window.synapse.__setScanTree({ok:true,plans:[{root:"C:/tmp/lab2a",name:"lab2a",' +
+    'summary:{folders:9,files:14,textFiles:13,otherFiles:1,size:"42 KB",skipped:2,truncated:false},' +
+    'sample:["empire","empire/characters"]}]}); 0');
+  await js('routeDroppedFiles(["C:/tmp/lab2a"], 5, 9999); 0');
+  await wait(400);
+  ok('a folder drop asks before importing', await js('askOpen()'), true);
+  {
+    const text = await js('document.getElementById("askTitle").textContent + " " + document.getElementById("askHint").textContent');
+    ok('the dialog names the folder', text.indexOf('lab2a') >= 0, true);
+    ok('and states the counts up front', text.indexOf('9 folders') >= 0 && text.indexOf('14 files') >= 0, true);
+    ok('and how many are readable', text.indexOf('13 readable') >= 0, true);
+    ok('and what it will skip', text.indexOf('2 skipped') >= 0, true);
+    ok('and explains the result', text.toLowerCase().indexOf('bubble structure') >= 0, true);
+  }
+  ok('offers a split choice', await js(
+    'Array.prototype.some.call(document.querySelectorAll("#askFields .ask-input"),' +
+    'function(i){return i.dataset.key==="split"})'), true);
+
+  await js('document.getElementById("askOk").click()');
+  await wait(500);
+  ok('importTree called with the folder', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="importTree"})||{}).args[0])'),
+    '["C:/tmp/lab2a"]');
+  ok('and with the chosen options', await js(
+    '(function(){var c=window.synapse.__calls().find(function(x){return x.name==="importTree"});' +
+    'return c && typeof c.args[1].split === "boolean" && typeof c.args[1].includeBinaries === "boolean"})()'), true);
+  await js('window.synapse.__setScanTree({ok:true,plans:[]}); 0');
+
   console.log('\nbreakdown usage guide:');
   await js('openSettings(); selectSettingsTab("breakdown"); 0');
   await wait(150);

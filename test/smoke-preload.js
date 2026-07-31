@@ -9,6 +9,7 @@ const rec = (name, result) => (...args) => { calls.push({ name, args }); return 
 // the test drives that callback directly
 let dropCb = null;
 let updateCb = null;
+let scanTreeResult = { ok: true, plans: [] };
 
 contextBridge.exposeInMainWorld('synapse', {
   getVault: rec('getVault', 'C:/tmp/vault'),
@@ -35,6 +36,12 @@ contextBridge.exposeInMainWorld('synapse', {
   attachToNote: rec('attachToNote', { ok: true, attached: [{ name: 'a.txt', kind: 'text' }], children: [], skipped: [] }),
   breakdownFile: rec('breakdownFile', { ok: true, docs: [{ doc: { id: 'Breakdown/doc.md', title: 'Doc' }, parts: [{ id: 'Breakdown/p1.md' }, { id: 'Breakdown/p2.md' }] }], skipped: [], folder: 'Breakdown' }),
   pickFiles: rec('pickFiles', ['C:/tmp/picked.txt']),
+  pickFolder: rec('pickFolder', ['C:/tmp/tree']),
+  scanTree: (...args) => { calls.push({ name: 'scanTree', args }); return Promise.resolve(scanTreeResult); },
+  importTree: rec('importTree', {
+    ok: true,
+    results: [{ root: 'Imported/lab2a', name: 'lab2a', folders: 8, notes: 11, parts: 0, attachments: 0, skipped: [], truncated: false }]
+  }),
   onFilesDropped: (cb) => { dropCb = (typeof cb === 'function') ? cb : null; },
   openFolder: rec('openFolder', { ok: true, path: 'C:/tmp/vault/Ideas' }),
   renameFolder: rec('renameFolder', { ok: true, id: 'Renamed', title: 'Renamed' }),
@@ -82,11 +89,13 @@ contextBridge.exposeInMainWorld('synapse', {
   onVaultChanged: () => () => {},
   onShortcutFailed: () => () => {},
   onQuickReset: () => () => {},
+  onImportProgress: () => () => {},
 
   // test-only introspection
   __calls: () => calls.slice(),
   __reset: () => { calls.length = 0; },
   __hasDropCb: () => typeof dropCb === 'function',
   __fireDrop: (info) => { if (dropCb) dropCb(info); },
-  __fireUpdate: (info) => { if (updateCb) updateCb(info); }
+  __fireUpdate: (info) => { if (updateCb) updateCb(info); },
+  __setScanTree: (r) => { scanTreeResult = r; }
 });

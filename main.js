@@ -1075,9 +1075,11 @@ handle('create-note', (_e, text, folderId, opts) => {
 });
 
 // ---- broad import ----
-const TEXTUAL = new Set(['.md', '.markdown', '.txt', '.csv', '.tsv', '.log', '.json']);
-const EMBEDDABLE = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.pdf',
-  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.zip', '.mp4', '.mp3', '.wav']);
+// One source of truth for which extensions are read versus attached, shared
+// with the folder-tree planner.
+const tree = require('./tree');
+const TEXTUAL = tree.TEXTUAL;
+const EMBEDDABLE = tree.EMBEDDABLE;
 
 function copyToAttachments(src) {
   const attachDir = path.join(settings.vaultPath, vault.ATTACH_DIR);
@@ -1381,6 +1383,147 @@ handle('install-update', () => {
     log.error('quitAndInstall failed: ', err);
     return { ok: false, error: String(err.message || err) };
   }
+});
+
+// ---------- folder-tree import ----------
+// Drop a directory and get its shape back as a graph: folders become bubbles,
+// files become notes inside them, nesting preserved to the leaf.
+
+handle('scan-tree', async (_e, paths, opts) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const plans = [];
+  for (const src of (paths || [])) {
+    let st;
+    try { st = fs.statSync(src); } catch { continue; }
+    if (!st.isDirectory()) continue;
+    const plan = await tree.planTree(src, opts || {});
+    plans.push({
+      root: src,
+      name: plan.name,
+      summary: tree.describePlan(plan),
+      // a shallow preview of the shape, for the confirmation dialog
+      sample: plan.folders.slice(0, 12)
+    });
+  }
+  return { ok: true, plans };
+});
+
+handle('import-tree', async (event, paths, opts) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const o = opts || {};
+  const base = o.folder == null ? 'Imported' : o.folder;
+  const send = (payload) => {
+    try { event.sender.send('import-progress', payload); } catch {}
+  };
+
+  const results = [];
+  touched();
+
+  for (const src of (paths || [])) {
+    let st;
+    try { st = fs.statSync(src); } catch { continue; }
+    if (!st.isDirectory()) continue;
+
+    const plan = await tree.planTree(src, o);
+    const rootName = sanitizeName(plan.name, 'Imported');
+    const destRootRel = base ? base + '/' + rootName : rootName;
+
+    // never merge into an existing folder by accident
+    let finalRel = destRootRel, n = 2;
+    while (fs.existsSync(inVault(finalRel))) finalRel = destRootRel + '-' + n++;
+    fs.mkdirSync(inVault(finalRel), { recursive: true });
+
+    // 1. mirror the directory structure, so empty folders still become bubbles
+    const mapDir = new Map([['', finalRel]]);
+    for (const relDir of plan.folders) {
+      const safe = relDir.split('/').map(seg => sanitizeName(seg, 'folder')).join('/');
+      const target = finalRel + '/' + safe;
+      mapDir.set(relDir, target);
+      fs.mkdirSync(inVault(target), { recursive: true });
+      const keep = path.join(inVault(target), '.keep');
+      if (!fs.existsSync(keep)) writeFileAtomic(keep, '');
+    }
+
+    // 2. convert the files
+    let notes = 0, parts = 0, attachments = 0;
+    const failed = [];
+    let done = 0;
+
+    for (const f of plan.files) {
+      const relDir = f.rel.includes('/') ? f.rel.slice(0, f.rel.lastIndexOf('/')) : '';
+      const destFolder = mapDir.get(relDir) || finalRel;
+      const destAbs = inVault(destFolder);
+      fs.mkdirSync(destAbs, { recursive: true });
+      const baseName = path.basename(f.rel, path.extname(f.rel));
+
+      try {
+        if (f.kind === 'text') {
+          const raw = fs.readFileSync(f.abs, 'utf8');
+          if (o.split) {
+            const sections = classifier.breakdown(raw, { limit: 40 });
+            if (sections.length > 1) {
+              const doc = writeNoteFile(destAbs, baseName,
+                'Imported from `' + f.rel + '`\n\n' + sections.length + ' parts extracted.', destFolder, null);
+              notes++;
+              for (const s of sections) {
+                writeNoteFile(destAbs, s.title, s.body + '\n\n#' + s.kind, destFolder, doc.id);
+                parts++;
+              }
+            } else {
+              writeNoteFile(destAbs, baseName, raw, destFolder, null); notes++;
+            }
+          } else {
+            writeNoteFile(destAbs, baseName, raw, destFolder, null); notes++;
+          }
+        } else {
+          const att = copyToAttachments(f.abs);
+          writeNoteFile(destAbs, baseName, att.markdown + '\n', destFolder, null);
+          attachments++; notes++;
+        }
+      } catch (err) {
+        log.warn('tree import failed for ' + f.rel + ': ', err);
+        failed.push({ path: f.rel, why: 'could not import' });
+      }
+
+      done++;
+      if (done % 25 === 0 || done === plan.files.length) {
+        send({ done, total: plan.files.length, label: f.rel });
+        await new Promise(r => setImmediate(r));   // keep the main process breathing
+      }
+    }
+
+    // 3. optional folder notes, so every bubble has a page of its own
+    if (o.folderNotes) {
+      for (const target of mapDir.values()) {
+        try { fileForNode(target); } catch (err) { log.warn('folder note failed for ' + target + ': ', err); }
+      }
+    }
+
+    vault.clearCache();
+    log.info('imported tree ' + plan.name + ': ' + plan.folders.length + ' folders, ' +
+      notes + ' notes, ' + parts + ' parts, ' + plan.skipped.length + ' skipped');
+
+    results.push({
+      root: finalRel,
+      name: rootName,
+      folders: plan.folders.length,
+      notes, parts, attachments,
+      skipped: plan.skipped.concat(failed),
+      truncated: plan.truncated
+    });
+  }
+
+  if (!results.length) return { ok: false, error: 'Nothing there looked like a folder.' };
+  return { ok: true, results };
+});
+
+// Pick a folder to import as a tree.
+handle('pick-folder', async (_e, title) => {
+  const r = await dialog.showOpenDialog({
+    title: title || 'Choose a folder to import',
+    properties: ['openDirectory', 'multiSelections']
+  });
+  return (r.canceled ? [] : r.filePaths);
 });
 
 // Pick arbitrary files (the import dialog is deliberately narrow; this is not).

@@ -94,6 +94,12 @@ const THEMES = {
   });
   if (api.onMenuAction) api.onMenuAction(handleMenuAction);
   if (api.onVaultChanged) api.onVaultChanged(onVaultChanged);
+  if (api.onImportProgress) api.onImportProgress(p => {
+    const label = el('dropzone').querySelector('.dropzone-inner');
+    if (label && p && p.total) {
+      label.textContent = 'Importing ' + p.done + ' of ' + p.total + '…';
+    }
+  });
   if (api.onShortcutFailed) api.onShortcutFailed(msg =>
     toast('Quick-capture hotkey unavailable — ' + escapeHtml(String(msg || '')) ));
 
@@ -1650,6 +1656,20 @@ function dropTargetAt(clientX, clientY) {
 async function routeDroppedFiles(paths, clientX, clientY) {
   const target = dropTargetAt(clientX, clientY);
 
+  // A dropped folder is a structure, not a file: mirror it into the graph.
+  let folderRoots = [];
+  try {
+    const scan = await api.scanTree(paths, {});
+    folderRoots = (scan && scan.ok) ? scan.plans : [];
+  } catch { folderRoots = []; }
+  if (folderRoots.length) {
+    const dest = target.kind === 'folder' ? target.node.id
+      : target.kind === 'tab' ? (target.tab.scopeId || 'Imported')
+      : 'Imported';
+    await importFolderTree(folderRoots, dest);
+    return;
+  }
+
   // dropped straight onto a note: attach the files to it
   if (target.kind === 'note') { await routeAttach(target.node.id, paths, target.node.title); return; }
 
@@ -1678,6 +1698,99 @@ async function routeAttach(noteId, paths, title) {
   const kids = res.children.length ? ' · ' + res.children.length + ' child note(s)' : '';
   const skipped = res.skipped.length ? ' · skipped ' + res.skipped.length : '';
   toast('Attached ' + res.attached.length + ' file(s) to <b>' + name + '</b>' + kids + skipped);
+}
+
+// Import one or more folder trees, after showing exactly what will happen.
+async function importFolderTree(plans, destFolder) {
+  const totals = plans.reduce((acc, p) => ({
+    folders: acc.folders + p.summary.folders,
+    files: acc.files + p.summary.files,
+    text: acc.text + p.summary.textFiles,
+    other: acc.other + p.summary.otherFiles,
+    skipped: acc.skipped + p.summary.skipped
+  }), { folders: 0, files: 0, text: 0, other: 0, skipped: 0 });
+
+  const names = plans.map(p => p.name).join(', ');
+  const sizes = plans.map(p => p.summary.size).join(' + ');
+  const truncated = plans.some(p => p.summary.truncated);
+
+  const detail =
+    totals.folders + ' folder' + (totals.folders === 1 ? '' : 's') + ' · ' +
+    totals.files + ' file' + (totals.files === 1 ? '' : 's') +
+    ' (' + totals.text + ' readable, ' + totals.other + ' attached) · ' + sizes +
+    (totals.skipped ? ' · ' + totals.skipped + ' skipped' : '') +
+    (truncated ? ' · TRUNCATED at the file limit' : '');
+
+  const folders = await api.listFolders();
+  const r = await askForm({
+    title: 'Import "' + short(names) + '" as a graph',
+    hint: detail + '. The folder structure becomes the bubble structure.',
+    okLabel: 'Import',
+    fields: [
+      { key: 'folder', label: 'Place it under',
+        options: folderOptions(folders).concat([{ value: 'Imported', label: 'Imported (new)' }]),
+        value: destFolder },
+      { key: 'split', label: 'Text files', value: 'no', options: [
+        { value: 'no', label: 'One note per file' },
+        { value: 'yes', label: 'Break each file into its parts' }
+      ] },
+      { key: 'binaries', label: 'Files it cannot read', value: 'yes', options: [
+        { value: 'yes', label: 'Attach them (PDFs, images, archives)' },
+        { value: 'no', label: 'Skip them — text only' }
+      ] },
+      { key: 'folderNotes', label: 'Folder pages', value: 'no', options: [
+        { value: 'no', label: 'Plain folders' },
+        { value: 'yes', label: 'Give every folder its own linkable note' }
+      ] }
+    ]
+  });
+  if (!r) return;
+
+  const roots = plans.map(p => p.root);
+  toast('Importing <b>' + short(names) + '</b>…');
+  setImportBusy(true);
+
+  let res;
+  try {
+    res = await api.importTree(roots, {
+      folder: r.folder,
+      split: r.split === 'yes',
+      includeBinaries: r.binaries === 'yes',
+      folderNotes: r.folderNotes === 'yes'
+    });
+  } catch (err) {
+    setImportBusy(false);
+    toast('Import failed — see the log for details.');
+    return;
+  }
+  setImportBusy(false);
+
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not import that folder.'); return; }
+
+  await refresh();
+  const first = res.results[0];
+  if (first) {
+    // open the imported tree in its own tab and frame it
+    const node = graph.map.get(first.root);
+    if (node) { openTabForNode(node); setTimeout(() => graph.home(), 400); }
+    else graph.home();
+  }
+  const made = res.results.reduce((a, x) => ({
+    folders: a.folders + x.folders, notes: a.notes + x.notes,
+    parts: a.parts + x.parts, skipped: a.skipped + x.skipped.length
+  }), { folders: 0, notes: 0, parts: 0, skipped: 0 });
+
+  toast('Imported <b>' + made.folders + '</b> folder(s) and <b>' + made.notes + '</b> note(s)' +
+    (made.parts ? ' · ' + made.parts + ' parts' : '') +
+    (made.skipped ? ' · ' + made.skipped + ' skipped' : ''));
+}
+
+// A large tree takes a while; show where it has got to.
+function setImportBusy(on) {
+  const zone = el('dropzone');
+  const label = zone.querySelector('.dropzone-inner');
+  if (on) { label.textContent = 'Importing…'; zone.classList.remove('hidden'); }
+  else zone.classList.add('hidden');
 }
 
 async function breakdownInto(paths, tab) {
@@ -1787,6 +1900,14 @@ function renderPalette() {
     { kind: 'action', label: 'Lens: My Skills (prerequisite tree)', run: () => { closePalette(); setLens('skills'); } },
     { kind: 'action', label: 'Lens: Knowledge (subject clusters)', run: () => { closePalette(); setLens('knowledge'); } },
     { kind: 'action', label: 'Import files…', run: async () => { closePalette(); onImport(); } },
+    { kind: 'action', label: 'Import a folder as a graph…', run: async () => {
+      closePalette();
+      const dirs = await api.pickFolder('Choose a folder to import as a graph');
+      if (!dirs.length) return;
+      const scan = await api.scanTree(dirs, {});
+      if (!scan || !scan.ok || !scan.plans.length) { toast('Nothing importable in there.'); return; }
+      await importFolderTree(scan.plans, 'Imported');
+    } },
     { kind: 'action', label: 'How Breakdown works (guide)', run: () => { closePalette(); openSettings(); selectSettingsTab('breakdown'); } },
     { kind: 'action', label: 'Break down a file into its parts…', run: async () => {
       closePalette();
