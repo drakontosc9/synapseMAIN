@@ -87,6 +87,7 @@ contextBridge.exposeInMainWorld('synapse', {
   renameFolder:   (relId, name)  => ipcRenderer.invoke('rename-folder', relId, name),
   mergeFolders:   (from, into)   => ipcRenderer.invoke('merge-folders', from, into),
   deleteFolder:   (relId)        => ipcRenderer.invoke('delete-folder', relId),
+  moveFolder:     (relId, into)  => ipcRenderer.invoke('move-folder', relId, into),
 
   // ephemeral notes
   setNoteTtl:     (relId, hours) => ipcRenderer.invoke('set-note-ttl', relId, hours),
@@ -97,6 +98,7 @@ contextBridge.exposeInMainWorld('synapse', {
   setParent:      (child, parent)=> ipcRenderer.invoke('set-parent', child, parent),
   addWikilink:    (from, to)     => ipcRenderer.invoke('add-wikilink', from, to),
   createFolder:   (name, parent) => ipcRenderer.invoke('create-folder', name, parent),
+  ensureFolderNote: (relId)      => ipcRenderer.invoke('ensure-folder-note', relId),
   groupNotes:     (ids, name)    => ipcRenderer.invoke('group-notes', ids, name),
   moveNote:       (id, folderId) => ipcRenderer.invoke('move-note', id, folderId),
   listFolders:    ()             => ipcRenderer.invoke('list-folders'),

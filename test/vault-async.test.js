@@ -66,6 +66,40 @@ function makeVault() {
     ok('clearCache is transparent', titleOf(fourth, 'Ideas/a.md'), 'Alpha renamed');
   }
 
+  console.log('\nvault holds a digest, not the whole body:');
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vdigest-'));
+    fs.mkdirSync(path.join(dir, 'Big'), { recursive: true });
+    const para = 'Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod. ';
+    const body = para.repeat(200);                 // ~14k characters
+    fs.writeFileSync(path.join(dir, 'Big/long.md'),
+      ['---', 'title: "Long"', 'folder: Big', 'tags: [x]', '---', body].join('\n'));
+    // whitespace-heavy prefix: the excerpt must still come out full length
+    fs.writeFileSync(path.join(dir, 'Big/spaced.md'),
+      ['---', 'title: "Spaced"', 'folder: Big', 'tags: [x]', '---',
+        '\n\n\n     \n\n' + para.repeat(20)].join('\n'));
+
+    vault.clearCache();
+    const m = await vault.scanAsync(dir);
+    const long = m.nodes.find(n => n.id === 'Big/long.md');
+    const spaced = m.nodes.find(n => n.id === 'Big/spaced.md');
+
+    ok('the raw body is not carried on the node', long.body, undefined);
+    ok('excerpt is capped', long.excerpt.length, 160);
+    ok('excerpt has collapsed whitespace', /\s{2,}/.test(long.excerpt), false);
+    ok('leading blank lines do not truncate the excerpt', spaced.excerpt.length, 160);
+
+    truthy('search text is bounded well below the body', long.search.length < body.length / 2);
+    truthy('search still contains real body text', long.search.indexOf('lorem ipsum') >= 0);
+    truthy('search is lowercased', long.search === long.search.toLowerCase());
+    truthy('filename stays searchable', long.search.indexOf('long') >= 0);
+    truthy('mass still reflects the full body', long.mass > 10000);
+
+    // the whole payload must stay proportionate to the digest, not the vault
+    const payload = JSON.stringify(m).length;
+    truthy('scan payload stays smaller than the source text', payload < body.length * 2);
+  }
+
   console.log('\nvault tag fan-out guard:');
   {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vfanout-'));

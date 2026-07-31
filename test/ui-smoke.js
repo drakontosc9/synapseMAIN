@@ -268,11 +268,17 @@ app.whenReady().then(async () => {
 
   console.log('\ncollision tagging (drop a note on a folder):');
   await js('window.synapse.__reset()');
-  await js('dropInFolder("Ideas/b.md", "Ideas"); 0');
+  await js('dropInFolder("Ideas/b.md", "Tasks"); 0');
   await wait(250);
   ok('moveNote called with the folder', await js(
     'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="moveNote"})||{}).args)'),
-    '["Ideas/b.md","Ideas"]');
+    '["Ideas/b.md","Tasks"]');
+  // dropping into the folder it already lives in must not rewrite anything
+  await js('window.synapse.__reset()');
+  await js('dropInFolder("Ideas/b.md", "Ideas"); 0');
+  await wait(250);
+  ok('a no-op drop does not touch the file', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="moveNote"}).length'), 0);
 
   console.log('\nmarquee multi-select:');
   // dropInFolder above triggered a refresh against the stub's empty vault, so
@@ -285,8 +291,13 @@ app.whenReady().then(async () => {
     '{id:"Ideas/c.md",type:"note",title:"C",containerId:"Ideas",folder:"Ideas",tags:[],links:[],mass:10}' +
     '],links:[],suggestions:[]})');
   await wait(100);
-  ok('selectAllVisible picks up notes', await js(
-    '(function(){graph.clearSelection();graph.selectAllVisible();return graph.getSelection().length})()'), 3);
+  // select-all takes folders as well as notes, since both are now actionable
+  ok('selectAllVisible picks up notes and the folder', await js(
+    '(function(){graph.clearSelection();graph.selectAllVisible();return graph.getSelection().length})()'), 4);
+  ok('it can be restricted to notes', await js(
+    '(function(){graph.clearSelection();graph.selectAllVisible("note");return graph.getSelection().length})()'), 3);
+  ok('and to folders', await js(
+    '(function(){graph.clearSelection();graph.selectAllVisible("folder");return graph.getSelection().length})()'), 1);
   ok('clearSelection empties it', await js(
     '(function(){graph.clearSelection();return graph.getSelection().length})()'), 0);
 
@@ -540,6 +551,117 @@ app.whenReady().then(async () => {
   ok('master survives', await js('!!tabs.find(function(t){return t.id==="master"})'), true);
   ok('breakdown survives', await js('!!tabs.find(function(t){return t.kind==="ingest"})'), true);
   ok('active falls back to a surviving tab', await js('!!tabs.find(function(t){return t.id===activeTabId})'), true);
+
+  console.log('\nbreakdown usage guide:');
+  await js('openSettings(); selectSettingsTab("breakdown"); 0');
+  await wait(150);
+  ok('guide tab exists', await js('!!document.querySelector(\'.tab[data-tab="breakdown"]\')'), true);
+  ok('guide page is shown', await js(
+    '!document.querySelector(\'.tabpage[data-page="breakdown"]\').classList.contains("hidden")'), true);
+  {
+    const text = await js('document.querySelector(\'.tabpage[data-page="breakdown"]\').textContent');
+    const has = (s) => text.indexOf(s) >= 0;
+    ok('documents the heading rule', has('Headings first'), true);
+    ok('documents the list rule', has('#point') || has('point'), true);
+    ok('documents the action cues', has('deadline'), true);
+    ok('documents the highlight fallback', has('densest sentences'), true);
+    ok('lists readable formats', has('.markdown'), true);
+    ok('is explicit that PDFs are not parsed', has('not'), true);
+    ok('states the size limit', has('64 MB'), true);
+    ok('states the part limit', has('40 parts'), true);
+    ok('states it never rewrites your text', has('verbatim'), true);
+    ok('states nothing leaves the machine', has('no network call'), true);
+  }
+  await js('closeSettings(); 0');
+
+  console.log('\nfolders are linkable:');
+  await js('window.synapse.__reset()');
+  await js('makeLink("Ideas", "Tasks"); 0');
+  await wait(300);
+  ok('folder to folder goes through addWikilink', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="addWikilink"})||{}).args)'),
+    '["Ideas","Tasks"]');
+  await js('window.synapse.__reset()');
+  await js('makeLink("Ideas/a.md", "Tasks"); 0');
+  await wait(300);
+  ok('note to folder works the same way', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="addWikilink"})||{}).args)'),
+    '["Ideas/a.md","Tasks"]');
+
+  console.log('\ndropping a note on a folder parents it there:');
+  await js('window.synapse.__reset()');
+  await js('makeChild("Ideas/a.md", "Tasks"); 0');
+  await wait(300);
+  ok('folder target files the note instead of erroring', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="moveNote"})||{}).args)'),
+    '["Ideas/a.md","Tasks"]');
+  ok('and does not try to set a note parent', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="setParent"}).length'), 0);
+
+  console.log('\nfolders can be selected, moved and deleted:');
+  await js('lastScan = window.__fx; graph.setData(lastScan); graph.clearSelection(); 0');
+  await wait(150);
+
+  // selection
+  await js('graph._toggleSelect(graph.map.get("Ideas")); 0');
+  await wait(120);
+  ok('a folder can be selected', await js('graph.getSelection().indexOf("Ideas") >= 0'), true);
+  ok('the selection bar appears for a folder alone', await js(
+    '!document.getElementById("selbar").classList.contains("hidden")'), true);
+  ok('it counts folders', await js(
+    'document.getElementById("selcount").textContent.indexOf("1 folder") >= 0'), true);
+  ok('grouping is hidden with no notes selected', await js(
+    'document.getElementById("groupSelected").classList.contains("hidden")'), true);
+
+  await js('graph._toggleSelect(graph.map.get("Ideas/a.md")); 0');
+  await wait(120);
+  ok('a mixed selection is described', await js(
+    'document.getElementById("selcount").textContent.indexOf("note") >= 0 && ' +
+    'document.getElementById("selcount").textContent.indexOf("folder") >= 0'), true);
+  ok('grouping returns once a note is in', await js(
+    '!document.getElementById("groupSelected").classList.contains("hidden")'), true);
+
+  // bulk delete
+  await js('window.synapse.__reset()');
+  await js('doDeleteSelected(); 0');
+  await wait(200);
+  ok('bulk delete confirms first', await js('askOpen()'), true);
+  await js('document.getElementById("askOk").click()');
+  await wait(400);
+  ok('the note was trashed', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="deleteNote"})||{}).args)'),
+    '["Ideas/a.md"]');
+  ok('the folder was trashed', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="deleteFolder"})||{}).args)'),
+    '["Ideas"]');
+  ok('selection cleared afterwards', await js('graph.getSelection().length'), 0);
+
+  // dragging a folder into another folder
+  await js('lastScan = window.__fx; graph.setData(lastScan); 0');
+  await wait(120);
+  await js('window.synapse.__reset()');
+  await js('dropInFolder("Ideas", "Tasks"); 0');
+  await wait(300);
+  ok('a dragged folder moves as a folder', await js(
+    'JSON.stringify((window.synapse.__calls().find(function(c){return c.name==="moveFolder"})||{}).args)'),
+    '["Ideas","Tasks"]');
+  ok('and does not go through moveNote', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="moveNote"}).length'), 0);
+
+  // a folder can be carried onto another folder via long-press too
+  await js('window.synapse.__reset()');
+  await js('makeChild("Ideas", "Tasks"); 0');
+  await wait(300);
+  ok('long-press drop routes folders the same way', await js(
+    'window.synapse.__calls().filter(function(c){return c.name==="moveFolder"}).length'), 1);
+
+  // those moves each triggered a refresh against the empty stub vault
+  await js('lastScan = window.__fx; graph.setData(lastScan); 0');
+  await wait(150);
+  ok('a folder cannot be dropped into its own subtree', await js(
+    'graph._isDescendant(graph.map.get("Ideas/Sub"), graph.map.get("Ideas"))'), true);
+  ok('unrelated folders are not descendants', await js(
+    'graph._isDescendant(graph.map.get("Tasks"), graph.map.get("Ideas"))'), false);
 
   console.log('\ncheck for updates button:');
   await js('window.synapse.__reset()');

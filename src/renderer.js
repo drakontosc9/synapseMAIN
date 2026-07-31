@@ -586,6 +586,7 @@ function wireWorkspace() {
   el('importBtn').addEventListener('click', onImport);
   el('linkBtn').addEventListener('click', onAddLink);
   el('groupSelected').addEventListener('click', doGroupSelected);
+  el('deleteSelected').addEventListener('click', doDeleteSelected);
   el('clearSel').addEventListener('click', () => { graph.clearSelection(); updateSelbar([]); });
   el('clearFocus').addEventListener('click', () => { graph.clearFocus(); el('focusbar').classList.add('hidden'); });
 
@@ -646,6 +647,13 @@ function onGlobalKey(e) {
     return;
   }
   if (mod && key === 'a' && !inTextField(e)) { e.preventDefault(); graph.selectAllVisible(); return; }
+
+  // Delete removes the selection, or the open note when nothing is selected
+  if ((e.key === 'Delete' || e.key === 'Backspace') && !inTextField(e)) {
+    if (graph.getSelection().length) { e.preventDefault(); doDeleteSelected(); return; }
+    if (e.key === 'Delete' && currentNote && !editing) { e.preventDefault(); doDeleteNote(); return; }
+    return;
+  }
 
   // tabs
   if (mod && key === 't' && !e.shiftKey) {
@@ -803,23 +811,51 @@ function hideSearch() { el('searchResults').classList.add('hidden'); }
 // ---------- actions ----------
 async function makeChild(childId, parentId) {
   hideHint(); const child = graph.map.get(childId), parent = graph.map.get(parentId);
-  if (!parent || parent.type !== 'note') { toast('Drop onto a <b>note</b> to set its parent.'); return; }
+  // A folder id has no .md extension; fall back to that when the node is not
+  // in this pane's map.
+  const parentIsFolder = parent ? parent.type === 'folder' : !/\.md$/i.test(String(parentId || ''));
+  if (parentIsFolder) { await dropInFolder(childId, parentId); return; }
+  if (!parent) { toast('Drop onto a note or a folder.'); return; }
+  // Dropping onto a folder means "this belongs in here" — the folder becomes
+  // the parent by containing it, which is the same thing on disk.
+  if (parent.type === 'folder') { await dropInFolder(childId, parentId); return; }
+  if (parent.type !== 'note') { toast('Drop onto a <b>note</b> or a <b>folder</b>.'); return; }
   const res = await api.setParent(childId, parentId);
   if (!res.ok) { toast(res.reason || 'Could not link.'); return; }
   pushUndo('parent of ' + short(child.title), async () => { await api.setParent(childId, res.prev); await refresh(); });
   await refresh(); toast('<b>' + short(child.title) + '</b> is now a child of <b>' + short(parent.title) + '</b>');
 }
 // Collision tagging: bumping a note into a folder bubble files it there.
+function isFolderId(id) {
+  const n = graph.map.get(id);
+  if (n) return n.type === 'folder';
+  return !/\.md$/i.test(String(id || ''));
+}
+
 async function dropInFolder(noteId, folderId) {
-  const note = graph.map.get(noteId), folder = graph.map.get(folderId);
-  if (!note || !folder) return;
+  if (!noteId) return;
+  // dragging a whole folder into another folder moves the folder itself
+  if (isFolderId(noteId)) { await moveFolderInto(noteId, folderId); return; }
+  const noteLabel = labelFor(noteId), folderLabel = labelFor(folderId);
   const from = parentDirOf(noteId);
+  if (from === (folderId || '')) { toast('<b>' + short(noteLabel) + '</b> is already in there'); return; }
   const res = await api.moveNote(noteId, folderId);
   if (!res || !res.ok) { toast((res && res.error) || 'Could not file that note.'); return; }
-  pushUndo('filing of ' + short(note.title), async () => { await api.moveNote(res.to, from); await refresh(); });
+  pushUndo('filing of ' + short(noteLabel), async () => { await api.moveNote(res.to, from); await refresh(); });
   await refresh();
   if (config.ripples) graph.rippleNote(res.to);
-  toast('<b>' + short(note.title) + '</b> filed into <b>' + short(folder.title) + '</b>');
+  toast('<b>' + short(noteLabel) + '</b> filed into <b>' + short(folderLabel) + '</b>');
+}
+
+async function moveFolderInto(folderId, intoId) {
+  const label = labelFor(folderId), target = intoId ? labelFor(intoId) : 'the vault root';
+  const res = await api.moveFolder(folderId, intoId || '');
+  if (!res || !res.ok) { toast((res && res.error) || 'Could not move that folder.'); return; }
+  if (res.already) { toast('<b>' + short(label) + '</b> is already in there'); return; }
+  const from = parentDirOf(folderId);
+  pushUndo('move of ' + short(label), async () => { await api.moveFolder(res.to, from); await refresh(); });
+  await refresh();
+  toast('Moved <b>' + short(label) + '</b> into <b>' + short(target) + '</b>');
 }
 
 async function toggleBurner(node) {
@@ -846,10 +882,24 @@ async function toggleBurner(node) {
   toast('<b>' + short(node.title) + '</b> self-destructs in ' + (Number(r.ttl) >= 24 ? Math.round(Number(r.ttl) / 24) + 'd' : r.ttl + 'h'));
 }
 
+// A node may not be in this pane's map — a scoped tab only holds its own
+// subtree — so never assume the lookup succeeded.
+function labelFor(id) {
+  const n = graph.map.get(id);
+  if (n && n.title) return n.title;
+  return String(id || '').replace(/\.md$/i, '').split('/').pop() || 'that node';
+}
+
 async function makeLink(fromId, toId) {
   const a = graph.map.get(fromId), b = graph.map.get(toId);
-  const res = await api.addWikilink(fromId, toId); await refresh();
-  toast(res.already ? 'Already linked' : 'Linked <b>' + short(a.title) + '</b> → <b>' + short(b.title) + '</b>');
+  const res = await api.addWikilink(fromId, toId);
+  if (!res || res.ok === false) { toast((res && res.reason) || 'Could not link those.'); return; }
+  await refresh();
+  const viaFolder = (a && a.type === 'folder') || (b && b.type === 'folder');
+  toast(res.already
+    ? 'Already linked'
+    : 'Linked <b>' + short(labelFor(fromId)) + '</b> → <b>' + short(labelFor(toId)) + '</b>' +
+      (viaFolder ? ' (via folder note)' : ''));
 }
 async function createGroup(parentDir) {
   const name = await askText({
@@ -954,10 +1004,66 @@ function pushUndo(label, fn) { undoStack.push({ label, fn }); if (undoStack.leng
 async function doUndo() { const a = undoStack.pop(); if (!a) { toast('Nothing to undo'); return; } await a.fn(); toast('Undid ' + a.label); }
 
 // ---------- selection / focus ----------
+function selectionSplit(ids) {
+  const notes = [], folders = [];
+  for (const id of (ids || [])) {
+    const n = graph.map.get(id);
+    if (!n) continue;
+    if (n.type === 'note') notes.push(id);
+    else if (n.type === 'folder') folders.push(id);
+  }
+  return { notes, folders };
+}
+
 function updateSelbar(ids) {
-  const notes = (ids || []).filter(id => { const n = graph.map.get(id); return n && n.type === 'note'; });
-  const canGroup = settings.groupCreate === 'selection' || settings.groupCreate === 'both';
-  if (notes.length && canGroup) { el('selbar').classList.remove('hidden'); el('selcount').textContent = notes.length + ' selected'; } else el('selbar').classList.add('hidden');
+  const { notes, folders } = selectionSplit(ids);
+  const total = notes.length + folders.length;
+  if (!total) { el('selbar').classList.add('hidden'); return; }
+
+  const parts = [];
+  if (notes.length) parts.push(notes.length + ' note' + (notes.length === 1 ? '' : 's'));
+  if (folders.length) parts.push(folders.length + ' folder' + (folders.length === 1 ? '' : 's'));
+  el('selcount').textContent = parts.join(' · ') + ' selected';
+
+  // grouping only makes sense for notes, deleting works on both
+  const canGroup = (settings.groupCreate === 'selection' || settings.groupCreate === 'both') && notes.length > 0;
+  el('groupSelected').classList.toggle('hidden', !canGroup);
+  el('selbar').classList.remove('hidden');
+}
+
+// Delete everything selected — notes and folders alike — behind one confirmation.
+async function doDeleteSelected() {
+  const { notes, folders } = selectionSplit(graph.getSelection());
+  const total = notes.length + folders.length;
+  if (!total) { toast('Nothing selected.'); return; }
+
+  const bits = [];
+  if (notes.length) bits.push(notes.length + ' note' + (notes.length === 1 ? '' : 's'));
+  if (folders.length) bits.push(folders.length + ' folder' + (folders.length === 1 ? '' : 's'));
+  const yes = await askConfirm({
+    title: 'Delete ' + bits.join(' and ') + '?',
+    hint: folders.length
+      ? 'Folders go to the trash with everything inside them. You can still restore from there.'
+      : 'They go to your system trash, so you can still restore them.',
+    okLabel: 'Move to trash', danger: true
+  });
+  if (!yes) return;
+
+  let done = 0, failed = 0;
+  for (const id of notes) {
+    try { await api.deleteNote(id); done++; } catch { failed++; }
+  }
+  // deepest folders first, so a parent never takes its selected child with it
+  for (const id of folders.slice().sort((a, b) => b.split('/').length - a.split('/').length)) {
+    const r = await api.deleteFolder(id);
+    if (r && r.ok) done++; else failed++;
+  }
+  graph.clearSelection(); updateSelbar([]);
+  if (currentNote && notes.indexOf(currentNote.id) !== -1) {
+    markDirty(false); el('panel').classList.add('hidden'); currentNote = null; graph.opened = null;
+  }
+  await refresh();
+  toast('Moved <b>' + done + '</b> item(s) to the trash' + (failed ? ' · ' + failed + ' failed' : ''));
 }
 function onFocusGraph(node) {
   el('focusbar').classList.remove('hidden');
@@ -984,6 +1090,7 @@ function showCtx({ x, y, node }) {
     add('Delete note…', () => doDeleteNote(node));
   } else if (node && node.type === 'folder') {
     add('Zoom into folder', () => graph._zoomToNode(node));
+    add(node.noteFile ? 'Open folder note' : 'Create folder note', () => openFolderNote(node));
     add('Open in a new tab', () => openTabForNode(node));
     if (splitTabId || tabs.length > 1) add('Open in the other pane', () => {
       const t = openTabForNode(node, { pane: 'b' });
@@ -998,6 +1105,13 @@ function showCtx({ x, y, node }) {
     sep();
     add('Merge into another folder…', () => doMergeFolder(node));
     add('Delete folder…', () => doDeleteFolder(node));
+  } else if (activeTab() && activeTab().kind === 'ingest') {
+    add('How Breakdown works…', () => { openSettings(); selectSettingsTab('breakdown'); });
+    add('Break down a file…', async () => {
+      const paths = await api.pickFiles('Choose a file to break down');
+      if (paths.length) breakdownInto(paths, activeTab());
+    });
+    add('Fit to view', () => graph.home());
   } else {
     add('New thought here', () => openSpawn(x, y));
     if (canEmpty) add('New group', () => createGroup(''));
@@ -1297,6 +1411,15 @@ function renderRecents() {
 async function openFolderInExplorer(relId) {
   const r = await api.openFolder(relId || '');
   if (!r || !r.ok) toast((r && r.error) || 'Could not open that folder.');
+}
+
+// A folder's own page. Created on demand, which is also what makes the folder
+// linkable — the [[wikilink]] has to live in a real file.
+async function openFolderNote(node) {
+  const r = await api.ensureFolderNote(node.id);
+  if (!r || !r.ok) { toast((r && r.error) || 'Could not open that folder note.'); return; }
+  await refresh();
+  await openNote({ id: r.id });
 }
 
 async function doRenameFolder(node) {
@@ -1664,6 +1787,7 @@ function renderPalette() {
     { kind: 'action', label: 'Lens: My Skills (prerequisite tree)', run: () => { closePalette(); setLens('skills'); } },
     { kind: 'action', label: 'Lens: Knowledge (subject clusters)', run: () => { closePalette(); setLens('knowledge'); } },
     { kind: 'action', label: 'Import files…', run: async () => { closePalette(); onImport(); } },
+    { kind: 'action', label: 'How Breakdown works (guide)', run: () => { closePalette(); openSettings(); selectSettingsTab('breakdown'); } },
     { kind: 'action', label: 'Break down a file into its parts…', run: async () => {
       closePalette();
       const paths = await api.pickFiles('Choose a file to break down');
