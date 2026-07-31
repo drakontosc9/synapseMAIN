@@ -40,6 +40,8 @@ contextBridge.exposeInMainWorld('synapse', {
   renameFolder: rec('renameFolder', { ok: true, id: 'Renamed', title: 'Renamed' }),
   mergeFolders: rec('mergeFolders', { ok: true, moved: [{ from: 'a', to: 'b' }], into: 'Tasks' }),
   deleteFolder: rec('deleteFolder', { ok: true, notes: 3 }),
+  moveFolder: rec('moveFolder', { ok: true, to: 'Tasks/Ideas', from: 'Ideas' }),
+  ensureFolderNote: rec('ensureFolderNote', { ok: true, id: 'Ideas/Ideas.md', folder: 'Ideas' }),
   setNoteTtl: rec('setNoteTtl', { ok: true, expires: '2030-01-01T00:00:00.000Z' }),
   purgeExpired: rec('purgeExpired', { removed: 0 }),
   vaultHasNotes: rec('vaultHasNotes', { hasNotes: false, count: 0 }),

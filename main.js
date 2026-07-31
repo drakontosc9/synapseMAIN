@@ -762,8 +762,24 @@ handle('save-image', async (_e, dataUrl) => {
 });
 
 // ---- frontmatter helpers (tested in fm.js) ----
+
+/** The file backing a node if it already exists — never creates one. */
+function existingFileFor(relId) {
+  let abs;
+  try { abs = inVault(relId); } catch { return null; }
+  try {
+    if (fs.statSync(abs).isDirectory()) {
+      const candidate = path.join(abs, path.basename(abs) + '.md');
+      return fs.existsSync(candidate) ? candidate : null;
+    }
+    return abs;
+  } catch { return null; }
+}
+
 const readParent = (relId) => {
-  try { return fmlib.getParent(fs.readFileSync(inVault(relId), 'utf8')); }
+  const f = existingFileFor(relId);
+  if (!f) return null;
+  try { return fmlib.getParent(fs.readFileSync(f, 'utf8')); }
   catch { return null; }
 };
 
@@ -772,7 +788,8 @@ handle('set-parent', (_e, childId, parentId) => {
   if (!settings.vaultPath) return { ok: false, reason: 'No vault selected.' };
   if (childId === parentId) return { ok: false, reason: 'A note cannot be its own parent.' };
   if (parentId && fmlib.wouldCycle(childId, parentId, readParent)) return { ok: false, reason: 'That would create a loop.' };
-  const file = inVault(childId);
+  // folders take a parent too — via their folder note
+  const file = fileForNode(childId).file;
   if (parentId) inVault(parentId);
   const prev = readParent(childId);
   touched();
@@ -780,11 +797,48 @@ handle('set-parent', (_e, childId, parentId) => {
   return { ok: true, prev: prev || null };
 });
 
+/**
+ * Resolve a graph id to the Markdown file that represents it.
+ *
+ * Notes are their own file. A folder is represented by its "folder note" —
+ * `Ideas/Ideas.md` — which is created on demand. That is what lets folders be
+ * linked and parented through exactly the same machinery as notes: the link
+ * ends up as an ordinary line in an ordinary file.
+ */
+function fileForNode(relId) {
+  const abs = inVault(relId);
+  let isDir = false;
+  try { isDir = fs.statSync(abs).isDirectory(); } catch { isDir = !/\.md$/i.test(relId); }
+  if (!isDir) return { file: abs, rel: relId, folder: null };
+
+  const name = path.basename(abs);
+  const noteRel = (relId ? relId + '/' : '') + name + '.md';
+  const noteAbs = path.join(abs, name + '.md');
+  if (!fs.existsSync(noteAbs)) {
+    const now = new Date().toISOString();
+    const body = ['---', 'title: ' + JSON.stringify(name), 'created: ' + now,
+      'folder: ' + name, 'tags: [folder]', '---', '',
+      'Notes about the **' + name + '** folder.', ''].join('\n');
+    touched();
+    writeFileAtomic(noteAbs, body, 'utf8');
+    log.info('created folder note for ' + relId);
+  }
+  return { file: noteAbs, rel: noteRel, folder: relId };
+}
+
+handle('ensure-folder-note', (_e, relId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const r = fileForNode(relId);
+  return { ok: true, id: r.rel, folder: r.folder };
+});
+
 // append a [[wikilink]] to fromId's body pointing at toId's title
 handle('add-wikilink', (_e, fromId, toId) => {
   if (!settings.vaultPath) return { ok: false, reason: 'No vault selected.' };
-  const toFile = inVault(toId);
-  const fromFile = inVault(fromId);
+  if (fromId === toId) return { ok: false, reason: 'A node cannot link to itself.' };
+  const to = fileForNode(toId), from = fileForNode(fromId);
+  const toFile = to.file;
+  const fromFile = from.file;
   const { fm } = fmlib.splitFM(fs.readFileSync(toFile, 'utf8'));
   const title = (fm.title ? String(fm.title).replace(/^"|"$/g, '') : path.basename(toId, '.md'));
   let content = fs.readFileSync(fromFile, 'utf8');
@@ -939,6 +993,29 @@ handle('merge-folders', (_e, fromId, intoId) => {
   vault.clearCache();
   log.info('merged ' + fromId + ' into ' + (intoId || 'vault root') + ' (' + moved.length + ' items)');
   return { ok: true, moved, into: intoId || '' };
+});
+
+// Move a whole folder into another folder ('' = vault root).
+handle('move-folder', (_e, relId, intoId) => {
+  if (!settings.vaultPath) return { ok: false, error: 'No vault selected.' };
+  const src = inVault(relId);
+  const destParent = intoId ? inVault(intoId) : path.resolve(settings.vaultPath);
+  if (path.resolve(destParent) === path.resolve(src)) return { ok: false, error: 'A folder cannot hold itself.' };
+  if (path.resolve(destParent).startsWith(path.resolve(src) + path.sep)) {
+    return { ok: false, error: 'Cannot move a folder into one of its own subfolders.' };
+  }
+  const name = path.basename(src);
+  if (path.resolve(path.dirname(src)) === path.resolve(destParent)) return { ok: true, to: relId, already: true };
+
+  fs.mkdirSync(destParent, { recursive: true });
+  let dest = path.join(destParent, name);
+  let n = 2;
+  while (fs.existsSync(dest)) dest = path.join(destParent, name + '-' + n++);
+  touched();
+  fs.renameSync(src, dest);
+  vault.clearCache();
+  log.info('moved folder ' + relId + ' -> ' + relOf(dest));
+  return { ok: true, to: relOf(dest), from: relId };
 });
 
 handle('delete-folder', async (_e, relId) => {

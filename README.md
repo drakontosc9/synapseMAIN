@@ -59,6 +59,34 @@ BEFORE YOU RUN THIS AS WITH ANY CODE DOWNLOADED FROM THE EVIL INTERNET RUN IT TH
 - **Open anything in Explorer** — right-click a folder bubble → *Open in file explorer*, a
   note → *Open containing folder*, or the background → *Open vault in file explorer*.
 
+### Folders are first-class
+
+A folder behaves like any other node, because it has a **folder note** — `Ideas/Ideas.md`,
+created the moment you need one. That single idea makes all of this work through the
+existing machinery, with the link stored as a real line in a real file:
+
+- **Link folders** — Ctrl-drag from a folder bubble to any note or folder. `[[Ideas]]`
+  written anywhere in the vault resolves to the bubble.
+- **Select folders** — Shift-click them, or rubber-band over them. `Ctrl+A` takes both.
+- **Delete folders** — from the selection bar, the right-click menu, or the `Delete` key.
+  Bulk delete handles notes and folders behind one confirmation, deepest folder first.
+- **Carry folders** — long-press a folder to pick it up, or drag it onto another folder to
+  move the whole thing (with everything inside). Dropping a folder into its own subtree is
+  refused.
+- **Open a folder's page** — right-click → *Open folder note* to give a folder its own text,
+  tags and parent.
+
+### Hierarchy rules
+
+- **A parent is always bigger than its children.** Enforced from the deepest node upward, so
+  growth propagates all the way to the root. Both kinds of parenthood count: the folder that
+  contains a node, and an explicit `parent:` note.
+- **A folder is the parent of what it holds.** A note with no explicit parent takes its
+  folder; a sub-folder takes its parent folder. That is what the sizing rule and the Skills
+  lens use.
+- **Nothing overlaps.** Bubbles and nodes resolve collisions positionally, splitting the
+  overlap by mass so a heavy node barely yields.
+
 ### Tactile graph
 
 - **Caveman drag-and-drop** — drag a note onto a **folder** to file it there instantly, or
@@ -121,6 +149,11 @@ Drop a file on its chip, or drop anything while it is the active tab.
 Each part becomes a child note tagged `#point` / `#action` / `#highlight`, all parented to a
 single document node — so the file arrives as a small map instead of a wall of text. Binary
 files can't be read into parts, so they're filed whole and told you so.
+
+**Settings → Breakdown** is the full guide: the exact order of the rules, which formats are
+read versus filed whole, every limit (64 MB per file, 40 parts per document), and what it
+deliberately will not do — it never summarises or rewrites, every part is verbatim, and
+nothing leaves your machine.
 
 ### Ingestion
 

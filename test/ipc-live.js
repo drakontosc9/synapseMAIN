@@ -146,6 +146,67 @@ app.whenReady().then(async () => {
     ok('unreadable path is skipped, not fatal', missing.skipped.length, 1);
   }
 
+  console.log('\nfolder notes make folders linkable:');
+  {
+    fs.mkdirSync(rel('Alpha'), { recursive: true });
+    fs.mkdirSync(rel('Beta'), { recursive: true });
+    writeNote('Beta/thing.md', 'Thing', 'a note');
+
+    const r = await invoke('ensure-folder-note', 'Alpha');
+    ok('folder note id follows the folder name', r.id, 'Alpha/Alpha.md');
+    truthy('the file was created', fs.existsSync(rel('Alpha', 'Alpha.md')));
+    const fmText = fs.readFileSync(rel('Alpha', 'Alpha.md'), 'utf8');
+    truthy('it is tagged as a folder note', fmText.indexOf('tags: [folder]') >= 0);
+
+    const again = await invoke('ensure-folder-note', 'Alpha');
+    ok('asking twice reuses the same file', again.id, 'Alpha/Alpha.md');
+
+    // folder -> folder link, written into Alpha's own note
+    const link = await invoke('add-wikilink', 'Alpha', 'Beta');
+    ok('folder to folder links', link.ok, true);
+    truthy('the link lands in the folder note',
+      fs.readFileSync(rel('Alpha', 'Alpha.md'), 'utf8').indexOf('[[Beta]]') >= 0);
+    truthy('the target folder note was created too', fs.existsSync(rel('Beta', 'Beta.md')));
+
+    // note -> folder
+    const link2 = await invoke('add-wikilink', 'Beta/thing.md', 'Alpha');
+    ok('note to folder links', link2.ok, true);
+    truthy('written into the note',
+      fs.readFileSync(rel('Beta', 'thing.md'), 'utf8').indexOf('[[Alpha]]') >= 0);
+
+    const self = await invoke('add-wikilink', 'Alpha', 'Alpha');
+    ok('a folder cannot link to itself', self.ok, false);
+
+    // and the scan turns those into edges between the bubbles
+    const m = await invoke('scan-vault');
+    const ids = new Set(m.nodes.map(n => n.id));
+    truthy('folder note is not a node of its own', !ids.has('Alpha/Alpha.md'));
+    truthy('folder to folder edge exists',
+      m.links.some(l => l.type === 'wikilink' &&
+        ((l.source === 'Alpha' && l.target === 'Beta') || (l.source === 'Beta' && l.target === 'Alpha'))));
+  }
+
+  console.log('\nmove-folder:');
+  {
+    fs.mkdirSync(rel('Movable', 'Inner'), { recursive: true });
+    writeNote('Movable/m.md', 'M', 'body');
+    fs.mkdirSync(rel('Target'), { recursive: true });
+
+    const r = await invoke('move-folder', 'Movable', 'Target');
+    ok('moved', r.ok, true);
+    ok('new id reported', r.to, 'Target/Movable');
+    truthy('contents came along', fs.existsSync(rel('Target', 'Movable', 'm.md')));
+    truthy('sub-folders came along', fs.existsSync(rel('Target', 'Movable', 'Inner')));
+    truthy('old location gone', !fs.existsSync(rel('Movable')));
+
+    const into_self = await invoke('move-folder', 'Target', 'Target');
+    ok('refuses to move into itself', into_self.ok, false);
+    const into_child = await invoke('move-folder', 'Target', 'Target/Movable');
+    ok('refuses to move into its own subfolder', into_child.ok, false);
+    const same = await invoke('move-folder', 'Target/Movable', 'Target');
+    ok('moving where it already is is a no-op', same.already, true);
+  }
+
   console.log('\nattach-to-note:');
   {
     writeNote('Concepts/host.md', 'Host', 'original body');

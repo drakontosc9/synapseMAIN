@@ -93,6 +93,7 @@
       <div id="selbar" class="selbar hidden">
         <span id="selcount"></span>
         <button id="groupSelected" class="primary small">Group into folder</button>
+        <button id="deleteSelected" class="ghost small danger">Delete</button>
         <button id="clearSel" class="ghost small">Clear</button>
       </div>
 
@@ -168,6 +169,7 @@
           <button class="tab active" data-tab="basic">Basic</button>
           <button class="tab" data-tab="advanced">Advanced</button>
           <button class="tab" data-tab="rules">Filing rules</button>
+          <button class="tab" data-tab="breakdown">Breakdown</button>
           <button class="tab" data-tab="help">How to use</button>
         </div>
 
@@ -239,6 +241,105 @@
           <div id="rulesPreviewOut" class="muted" style="margin:6px 0 12px"></div>
           <textarea id="rulesEditor" class="rules-editor" spellcheck="false"></textarea>
           <div class="panel-editbar"><button id="saveRules" class="primary small">Save rules</button><span id="rulesErr" class="muted"></span></div>
+        </div>
+
+        <div class="tabpage hidden" data-page="breakdown">
+          <div class="setting-desc">
+            The <b>Breakdown</b> tab takes a file apart into linked notes instead of dropping it
+            in whole. Drop a file on its chip, or drop anything while that tab is open.
+          </div>
+
+          <div class="setting">
+            <div class="setting-label">How it decides what matters</div>
+            <div class="guide">
+              <div class="guide-row"><span class="guide-badge sec">1</span><div>
+                <b>Headings first.</b> If the document has any <code>#</code> / <code>##</code> headings,
+                it splits there — one note per section, titled by the heading.
+              </div></div>
+              <div class="guide-row"><span class="guide-badge pt">2</span><div>
+                <b>Otherwise, lists.</b> Bullet (<code>-</code> <code>*</code> <code>•</code>) and numbered
+                items become one note each, tagged <code>#point</code>.
+              </div></div>
+              <div class="guide-row"><span class="guide-badge act">3</span><div>
+                <b>And action lines,</b> anywhere in the file — lines containing <i>todo, action,
+                next step, decision, decided, must, should, deadline, due, owner, risk, blocker,
+                question, follow-up</i>. Tagged <code>#action</code>.
+              </div></div>
+              <div class="guide-row"><span class="guide-badge hi">4</span><div>
+                <b>Failing all that,</b> the densest sentences in the prose, tagged
+                <code>#highlight</code>. This only runs when nothing structured was found, so
+                bullets are never repeated back at you.
+              </div></div>
+            </div>
+            <div class="setting-desc" style="margin-top:10px">
+              Every part becomes a child note of one <b>document note</b>, so the file arrives as a
+              small map you can zoom into — not a wall of text.
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-label">What it can read</div>
+            <div class="guide-cols">
+              <div>
+                <div class="guide-yes">Read and split</div>
+                <ul class="guide-list">
+                  <li><code>.md</code> <code>.markdown</code></li>
+                  <li><code>.txt</code> <code>.log</code></li>
+                  <li><code>.csv</code> <code>.tsv</code></li>
+                  <li><code>.json</code></li>
+                </ul>
+              </div>
+              <div>
+                <div class="guide-no">Filed whole, not read</div>
+                <ul class="guide-list">
+                  <li><code>.pdf</code> <code>.doc</code> <code>.docx</code></li>
+                  <li><code>.xls</code> <code>.xlsx</code> <code>.ppt</code> <code>.pptx</code></li>
+                  <li>images, audio, video, <code>.zip</code></li>
+                </ul>
+              </div>
+            </div>
+            <div class="setting-desc" style="margin-top:8px">
+              Binary formats are copied into <code>attachments/</code> and embedded in a note that
+              says so. Synapse does <b>not</b> extract text from PDFs or Word files — there is no
+              parser for them and no AI involved. To break one down, export it to text first.
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-label">Limits</div>
+            <ul class="guide-list">
+              <li><b>64 MB</b> per file — anything larger is skipped and reported.</li>
+              <li><b>40 parts</b> per document; the rest of the file is left in the document note.</li>
+              <li>List items shorter than <b>4 characters</b> are ignored as noise.</li>
+              <li>Highlight sentences must be <b>30–400 characters</b>.</li>
+              <li>Identical parts are de-duplicated.</li>
+              <li>Frontmatter is stripped, never treated as content.</li>
+              <li>Folders are not accepted — drop the files themselves.</li>
+            </ul>
+          </div>
+
+          <div class="setting">
+            <div class="setting-label">What it will not do</div>
+            <ul class="guide-list">
+              <li>It does not summarise or rewrite. Every part is <b>verbatim</b> from your file.</li>
+              <li>It does not judge importance beyond the structural rules above — a bullet is
+                  kept because it is a bullet, not because it is wise.</li>
+              <li>It does not merge or de-duplicate against notes you already have.</li>
+              <li>It does not delete or alter the source file; the original is only ever copied.</li>
+              <li>Nothing leaves your machine — there is no network call in any of this.</li>
+            </ul>
+          </div>
+
+          <div class="setting">
+            <div class="setting-label">Getting better results</div>
+            <ul class="guide-list">
+              <li>Add headings before importing a long document — that path gives the cleanest split.</li>
+              <li>Meeting notes work best as bullets, one thought per line.</li>
+              <li>Rename the file to something meaningful: the filename becomes the document note's title.</li>
+              <li>Nothing useful came out? Delete the document note — the children go with it — fix
+                  the structure, and drop it again.</li>
+            </ul>
+          </div>
         </div>
 
         <div class="tabpage hidden" data-page="help">

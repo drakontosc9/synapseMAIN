@@ -133,6 +133,47 @@
           n.weight = massOn ? 1 + linkPart * 0.18 + bodyPart * 0.22 : 1;
         } else { n.r = 0; n.weight = 1; }
       }
+      this._enforceParentSizes();
+    }
+
+    /**
+     * Invariant: a parent is always bigger than its children.
+     *
+     * Two kinds of parenthood count — the folder that contains a node, and an
+     * explicit `parent:` note — and both are enforced from the deepest node
+     * upward, so growth propagates all the way to the root.
+     */
+    _enforceParentSizes() {
+      const PAD = 16;        // a folder must visibly clear its biggest child
+      const RATIO = 1.22;    // a parent note is at least this much bigger
+      const MAX_R = 900;     // runaway guard
+
+      const parentOf = (n) => {
+        const explicit = n.parentNote ? this.map.get(n.parentNote) : null;
+        if (explicit && explicit !== n) return explicit;
+        return n.containerId ? this.map.get(n.containerId) : null;
+      };
+
+      // depth first, so children are settled before their parents grow
+      const depth = new Map();
+      const depthOf = (n) => {
+        if (depth.has(n.id)) return depth.get(n.id);
+        depth.set(n.id, 0);                       // cycle guard
+        const p = parentOf(n);
+        const d = p ? depthOf(p) + 1 : 0;
+        depth.set(n.id, d);
+        return d;
+      };
+      for (const n of this.nodes) depthOf(n);
+
+      const ordered = this.nodes.slice().sort((a, b) => (depth.get(b.id) || 0) - (depth.get(a.id) || 0));
+      for (const n of ordered) {
+        if (n.type === 'root') continue;
+        const p = parentOf(n);
+        if (!p || p.type === 'root') continue;
+        const needed = (p.type === 'folder') ? n.r + PAD : n.r * RATIO;
+        if (p.r < needed) p.r = Math.min(MAX_R, needed);
+      }
     }
 
     // Dynamic colour inheritance: a sub-node takes its parent folder's hue,
@@ -161,10 +202,13 @@
       }
       return best;
     }
-    selectAllVisible() {
+    /** Select every visible node. Pass 'note' or 'folder' to restrict it. */
+    selectAllVisible(kind) {
       const memo = new Map();
       for (const n of this.nodes) {
-        if (n.type !== 'note') continue;
+        if (n.type === 'root') continue;
+        if (kind && n.type !== kind) continue;
+        if (n.type !== 'note' && n.type !== 'folder') continue;
         if (this._nodeAlpha(n, memo) > .02) this.selected.add(n.id);
       }
       this.h.onSelectionChange && this.h.onSelectionChange([...this.selected]);
@@ -308,6 +352,30 @@
             // heavier nodes shrug off the shove; lighter ones get pushed into orbit
             const wa = a.weight || 1, wb = b.weight || 1;
             a.vx += fx / wa; a.vy += fy / wa; b.vx -= fx / wb; b.vy -= fy / wb;
+
+            // Hard collision: soft repulsion alone lets bubbles overlap when the
+            // spring forces are strong. Separate them positionally, splitting the
+            // overlap by mass so a heavy node barely yields.
+            if (c.collide !== false) {
+              const gap = (a.type === 'folder' || b.type === 'folder') ? 6 : 2;
+              const min = a.r + b.r + gap;
+              if (d < min) {
+                // Two nodes dropped on the exact same spot have no direction to
+                // separate along, so pick a stable one from their positions.
+                // note: d has a floor applied above, so test the real offset
+                const degenerate = Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6;
+                let ux = dx / d, uy = dy / d;
+                if (degenerate || !isFinite(ux) || !isFinite(uy)) {
+                  const ang = ((i * 2.399963 + j * 0.7853981) % 6.2831853);
+                  ux = Math.cos(ang); uy = Math.sin(ang);
+                }
+                const overlap = min - d;
+                const total = wa + wb;
+                const sa = wb / total, sb = wa / total;
+                if (a !== this.dragNode) { a.x += ux * overlap * sa; a.y += uy * overlap * sa; }
+                if (b !== this.dragNode) { b.x -= ux * overlap * sb; b.y -= uy * overlap * sb; }
+              }
+            }
           }
       for (const l of this.links) {
         const rest = l.type === 'wikilink' ? 84 : l.type === 'parent' ? 70 : 150;
@@ -690,18 +758,43 @@
       return best;
     }
     _isExpandedFolder(n) { return n.type === 'folder' && this._containerAlpha(n.id, new Map()) > .02; }
+    /** Is `node` inside `ancestor` (or the same node)? */
+    _isDescendant(node, ancestor) {
+      let cur = node, hops = 0;
+      while (cur && hops++ < 40) {
+        if (cur.id === ancestor.id) return true;
+        cur = cur.containerId ? this.map.get(cur.containerId) : null;
+      }
+      return false;
+    }
     _inMinimap(px, py) { const m = this.minimapRect; return m && px >= m.mx && px <= m.mx + m.mw && py >= m.my && py <= m.my + m.mh; }
 
     // ---------- events ----------
     _bind() {
       const c = this.canvas; let downX = 0, downY = 0, moved = false, downNode = null, downOnCanvas = false, lastT = 0, lastN = null;
-      const startLP = node => { this._clearLP(); this._lpTimer = setTimeout(() => { if (downNode === node && !moved && node.type === 'note') { this.held = node; this.ghost = { x: node.x, y: node.y }; this.dragNode = null; this.panning = false; this.h.onPickup && this.h.onPickup(node); } }, this.cfg.longPressMs); };
+      // Long-press picks a node up. Folders can be carried too — dropping one on
+      // another folder moves the whole folder inside it.
+      const startLP = node => {
+        this._clearLP();
+        this._lpTimer = setTimeout(() => {
+          if (downNode === node && !moved && (node.type === 'note' || node.type === 'folder')) {
+            this.held = node;
+            this.ghost = { x: node.x, y: node.y };
+            this.dragNode = null; this.panning = false;
+            this.h.onPickup && this.h.onPickup(node);
+          }
+        }, this.cfg.longPressMs);
+      };
 
       c.addEventListener('mousedown', e => {
         downOnCanvas = true; downX = e.offsetX; downY = e.offsetY; moved = false; this.panVel = null;
         if (this._inMinimap(e.offsetX, e.offsetY)) { this._minimapJump(e.offsetX, e.offsetY); this.panning = false; downNode = null; return; }
         const n = this._nodeAt(e.offsetX, e.offsetY); downNode = n;
-        if (n && (e.ctrlKey || e.metaKey) && n.type === 'note') { this.linkFrom = n; this.ghost = this._toWorld(e.offsetX, e.offsetY); return; }
+        // Ctrl-drag draws a link. Folders are linkable too — the edge lands on
+        // the bubble and is stored in that folder's own note.
+        if (n && (e.ctrlKey || e.metaKey) && (n.type === 'note' || n.type === 'folder')) {
+          this.linkFrom = n; this.ghost = this._toWorld(e.offsetX, e.offsetY); return;
+        }
         // Ctrl+drag on empty space = rubber-band multi-select
         if (!n && (e.ctrlKey || e.metaKey)) {
           this.marquee = { x0: e.offsetX, y0: e.offsetY, x1: e.offsetX, y1: e.offsetY, add: e.shiftKey };
@@ -719,9 +812,12 @@
         if (this.held || this.linkFrom) { this.ghost = wp; return; }
         if (this.dragNode) {
           this.dragNode.x = wp.x; this.dragNode.y = wp.y; this.reheat(.35);
-          // live target highlight while dragging a note over something droppable
-          this.dropTarget = (this.dragNode.type === 'note' && moved)
-            ? this._nodeAtWorld(wp.x, wp.y, this.dragNode) : null;
+          // live target highlight while dragging something droppable
+          const draggable = this.dragNode.type === 'note' || this.dragNode.type === 'folder';
+          let tgt = (draggable && moved) ? this._nodeAtWorld(wp.x, wp.y, this.dragNode) : null;
+          // a folder can never be dropped into itself or its own subtree
+          if (tgt && this.dragNode.type === 'folder' && this._isDescendant(tgt, this.dragNode)) tgt = null;
+          this.dropTarget = tgt;
           // dragging up out of the canvas can mean "spawn / route to a tab"
           if (moved && this.h.onDragOutside) this.h.onDragOutside(e.clientX, e.clientY);
         }
@@ -763,7 +859,7 @@
 
         // Dropping a dragged note onto something is the "caveman" gesture:
         // onto a folder files it there, onto another note nests it beneath.
-        if (this.dragNode && this.dragNode.type === 'note' && moved) {
+        if (this.dragNode && (this.dragNode.type === 'note' || this.dragNode.type === 'folder') && moved) {
           const tgt = this.dropTarget;
           this.dropTarget = null;
           if (tgt && tgt.type === 'folder' && tgt.id !== this.dragNode.containerId && this.h.onDropInFolder) {
@@ -782,7 +878,13 @@
         this.dropTarget = null;
 
         if (this.held) { const tgt = this._nodeAtWorld(this.ghost.x, this.ghost.y, this.held); if (tgt && this.h.onMakeChild) this.h.onMakeChild(this.held.id, tgt.id); this.held = null; return; }
-        if (this.linkFrom) { const tgt = this._nodeAtWorld(this.ghost.x, this.ghost.y, this.linkFrom); if (tgt && tgt.type === 'note' && this.h.onMakeLink) this.h.onMakeLink(this.linkFrom.id, tgt.id); this.linkFrom = null; return; }
+        if (this.linkFrom) {
+          const tgt = this._nodeAtWorld(this.ghost.x, this.ghost.y, this.linkFrom);
+          if (tgt && (tgt.type === 'note' || tgt.type === 'folder') && this.h.onMakeLink) {
+            this.h.onMakeLink(this.linkFrom.id, tgt.id);
+          }
+          this.linkFrom = null; return;
+        }
         if (!moved && downNode) {
           const now = performance.now(), dbl = (now - lastT < 320 && lastN === downNode); lastT = now; lastN = downNode;
           if (e.shiftKey) this._toggleSelect(downNode);
