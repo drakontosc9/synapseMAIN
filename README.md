@@ -288,6 +288,34 @@ Release. Installed copies pick it up within six hours, or immediately via
 
 If you run from source instead, there's nothing to update — `git pull` and restart.
 
+## Build it yourself (Windows)
+
+Double-click **`build.bat`** in the repo root. It walks the whole thing:
+
+1. Checks Node.js is installed and on your PATH.
+2. Fetches from the remote and tells you if your branch is behind it.
+3. Compares this checkout's version against the newest GitHub Release — so you find out
+   *before* a long build that you are about to package something older than what is
+   already published.
+4. Installs dependencies if `node_modules` is missing (`npm ci`, falling back to
+   `npm install`). The first run downloads Electron, so give it a few minutes.
+5. Runs the test suite.
+6. Packages the installer and prints where it landed.
+
+Anything that looks wrong stops and asks before continuing, rather than burning ten minutes
+and failing at the end.
+
+```bash
+build.bat            # normal build
+build.bat /check     # just tell me if I'm current, then stop
+build.bat /y         # never ask, useful for scripting
+build.bat /skiptests # straight to packaging
+build.bat /clean     # wipe node_modules and reinstall first
+```
+
+`build.bat /check` is worth knowing on its own — it answers "is my checkout current?" in a
+couple of seconds without building anything.
+
 ## Build a Windows installer
 
 CI builds this for you: **Actions → Build Windows app → Run workflow** produces a
